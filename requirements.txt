@@ -1,0 +1,7 @@
+aiogram>=3.31,<4
+APScheduler>=3.10,<4
+python-dotenv>=1.0,<2
+tzdata>=2025.2
+yt-dlp[default]>=2026.3.17
+imageio-ffmpeg>=0.6,<1
+gallery-dl>=1.27,<2

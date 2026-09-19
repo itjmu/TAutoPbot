@@ -1,0 +1,35 @@
+[Unit]
+Description=Telegram Automation Bot
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tautopbot
+Group=tautopbot
+WorkingDirectory=/opt/tautopbot
+EnvironmentFile=/etc/tautopbot.env
+Environment=PYTHONUNBUFFERED=1
+Environment=DB_FILE=/var/lib/tautopbot/bot.db
+Environment=FFMPEG_PATH=/usr/bin/ffmpeg
+Environment=PATH=/opt/tautopbot/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/tautopbot/.venv/bin/python /opt/tautopbot/bot.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=90
+KillMode=control-group
+StateDirectory=tautopbot
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tautopbot
+TasksMax=128
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

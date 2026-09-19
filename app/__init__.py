@@ -1,0 +1,1 @@
+"""Telegram automation application."""
