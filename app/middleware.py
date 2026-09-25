@@ -8,8 +8,9 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 
 from app import accounts as accounts
-from app import preferences
+from app import preferences, ui
 from app.features import sources as features_sources
+from app.features.channels import dismiss_picker
 from app.i18n import language_context, tr
 
 log = logging.getLogger(__name__)
@@ -24,8 +25,11 @@ class Guard(BaseMiddleware):
         user = getattr(event, "from_user", None)
         if not user:
             return
+        if isinstance(event, Message) and event.chat.type == "private":
+            await ui.note_message_async(user.id, event.message_id)
         language_context.set(preferences.get_preferences(user.id)["language"])
-        if accounts.blocked(user.id):
+        payment = isinstance(event, Message) and event.successful_payment is not None
+        if accounts.blocked(user.id) and not payment:
             if isinstance(event, CallbackQuery):
                 await event.answer(tr("Доступ запрещён."), show_alert=True)
             return
@@ -36,7 +40,7 @@ class Guard(BaseMiddleware):
         if not public and not (
             isinstance(event, Message) and (event.text or "").startswith("/start")
         ):
-            accounts.ensure_user(user)
+            await accounts.ensure_user_async(user)
         if (
             isinstance(event, CallbackQuery)
             and not public
@@ -47,8 +51,26 @@ class Guard(BaseMiddleware):
         if (
             isinstance(event, CallbackQuery)
             and not public
+            and event.data not in {"channel:add", "channel:picker"}
+        ) or (
+            isinstance(event, Message)
+            and (event.text or "").split(" ")[0].split("@")[0] in {"/cancel", "/start"}
+        ):
+            await dismiss_picker(data["bot"], user.id)
+        if (
+            isinstance(event, CallbackQuery)
+            and not public
             and not (event.data or "").startswith(
-                ("bw:", "aw:", "tw:", "cw:", "download:", "multi:", "contest:")
+                (
+                    "bw:",
+                    "aw:",
+                    "tw:",
+                    "cw:",
+                    "download:",
+                    "multi:",
+                    "contest:",
+                    "broadcast:",
+                )
             )
         ):
             await data["state"].clear()
@@ -60,7 +82,7 @@ class Guard(BaseMiddleware):
             if isinstance(event, CallbackQuery):
                 await event.answer(msg, show_alert=True)
             else:
-                await event.answer(html.escape(msg) + tr("\n/cancel — отмена"))
+                await ui.answer(event, html.escape(msg) + tr("\n/cancel — отмена"))
         except Exception:
             log.exception("Handler failed")
             if isinstance(event, CallbackQuery):
@@ -71,8 +93,9 @@ class Guard(BaseMiddleware):
                 except TelegramBadRequest:
                     pass
             else:
-                await event.answer(
+                await ui.answer(
+                    event,
                     tr(
                         "Не удалось завершить действие. Попробуйте снова; /cancel — отмена."
-                    )
+                    ),
                 )

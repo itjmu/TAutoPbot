@@ -15,8 +15,10 @@ from app.features import sources as features_sources
 from app.i18n import tr
 from app.routing import build_router
 from config import BOT_TOKEN, DB_FILE, validate_config
-from services import contests
+from services import broadcasts, contests
 from services.jobs import download_jobs
+from services.runtime import RuntimeTasks
+from services.telegram_rate import TelegramRateLimit
 
 log = logging.getLogger(__name__)
 
@@ -44,19 +46,25 @@ async def run_application():
     validate_config()
     database.init_db()
     contests.recover()
+    broadcasts.recover()
     scheduled_jobs.acquire_runtime_lock()
     database.execute(
         "UPDATE downloads SET status='failed',error='Перезапуск бота; выберите формат ещё раз' WHERE status='running'"
     )
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot.session.middleware(TelegramRateLimit())
+    running = RuntimeTasks()
     dp = Dispatcher(
         storage=storage.SQLiteStorage(), events_isolation=SimpleEventIsolation()
     )
     dp.include_router(build_router())
+    dp.update.outer_middleware(running)
     scheduler = AsyncIOScheduler(timezone="UTC")
     for function, seconds in [
-        (scheduled_jobs.scheduler_publish, 10),
-        (contests.tick, 10),
+        (scheduled_jobs.scheduler_publish, 1),
+        (contests.tick, 2),
+        (contests.closing_tick, 2),
+        (broadcasts.tick, 2),
         (features_sources.flush_albums, 2),
         (scheduled_jobs.scheduler_delete, 30),
         (scheduled_jobs.scheduler_requests, 300),
@@ -64,7 +72,7 @@ async def run_application():
         (scheduled_jobs.scheduler_premium_notifications, 1800),
     ]:
         scheduler.add_job(
-            function,
+            running.job(function),
             "interval",
             seconds=seconds,
             args=[bot],
@@ -78,11 +86,21 @@ async def run_application():
         me = await bot.get_me()
         log.info("Started v4.0.0 @%s", me.username)
         scheduler.start()
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        await dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types(),
+            tasks_concurrency_limit=100,
+            close_bot_session=False,
+        )
     finally:
         if scheduler.running:
+            scheduler.pause()
+        await running.close()
+        if scheduler.running:
             scheduler.shutdown(wait=False)
+        await contests.close_workers()
         await download_jobs.close()
+        await dp.storage.close()
         await bot.session.close()
         database.execute(
             "DELETE FROM runtime_lock WHERE owner=?", (scheduled_jobs.RUN_OWNER,)

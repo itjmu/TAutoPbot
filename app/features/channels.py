@@ -5,6 +5,7 @@ from datetime import timedelta
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
@@ -33,67 +34,27 @@ router = Router(name="features.channels")
 
 @router.callback_query(F.data == "menu:channels")
 async def menu_channels(c: CallbackQuery):
-    if not await access.access_callback(c):
-        return
-    await ui.edit(
-        c,
-        tr(
-            "📺 <b>Каналы / Группы</b>\n\nПодключено: <b>{v0}/{v1}</b>",
-            v0=accounts.channel_count(c.from_user.id),
-            v1=accounts.channel_limit(c.from_user.id),
-        ),
-        ui.channels_kb(),
-    )
-    await c.answer()
+    await channel_list(c)
 
 
 @router.callback_query(F.data == "channel:add")
 async def channel_add(c: CallbackQuery, state: FSMContext, bot: Bot):
     if not await access.access_callback(c):
         return
-    if accounts.channel_count(c.from_user.id) >= accounts.channel_limit(c.from_user.id):
+    if accounts.channel_limit(c.from_user.id) >= 0 and accounts.channel_count(
+        c.from_user.id
+    ) >= accounts.channel_limit(c.from_user.id):
         await c.answer(tr("Лимит объектов достигнут."), show_alert=True)
         return
     await state.set_state(AddChannel.waiting)
-    me = await bot.get_me()
     database.execute(
         "INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (f"channel_setup:{c.from_user.id}", timeutils.iso()),
     )
-    await ui.edit(
-        c,
-        tr(
-            "➕ <b>Добавление</b>\n\nОтправьте @username канала/группы или перешлите сообщение из него.\n\nБот должен быть администратором."
-        ),
-        ui.kb(
-            [
-                [
-                    InlineKeyboardButton(
-                        text=tr("➕ Выбрать канал и добавить бота"),
-                        callback_data="channel:picker",
-                    ),
-                    InlineKeyboardButton(
-                        text=tr("➕ Выбрать группу"),
-                        url=f"https://t.me/{me.username}?startgroup&admin=delete_messages+manage_chat+invite_users+restrict_members+pin_messages",
-                    ),
-                ],
-                [ui.choice(tr("⬅️ Назад"), "menu:channels")],
-            ]
-        ),
-    )
-    await c.answer()
-
-
-@router.callback_query(F.data == "channel:picker")
-async def channel_picker(c: CallbackQuery, state: FSMContext):
-    if not await access.access_callback(c):
-        return
-    await state.set_state(AddChannel.waiting)
-    database.execute(
-        "DELETE FROM app_settings WHERE key=?", (f"channel_setup:{c.from_user.id}",)
-    )
-    rights = ChatAdministratorRights(
+    await ui.edit(c, tr("➕ Добавить"), ui.back("menu:channels"))
+    rights = dict(
         is_anonymous=False,
+        can_send_welcome_messages=False,
         can_manage_chat=True,
         can_delete_messages=True,
         can_manage_video_chats=False,
@@ -104,12 +65,17 @@ async def channel_picker(c: CallbackQuery, state: FSMContext):
         can_post_stories=False,
         can_edit_stories=False,
         can_delete_stories=False,
-        can_send_welcome_messages=False,
-        can_post_messages=True,
-        can_edit_messages=True,
     )
-    await c.message.answer(
-        tr("➕ Выбрать канал и добавить бота"),
+    channel_rights = ChatAdministratorRights(
+        **rights, can_post_messages=True, can_edit_messages=True
+    )
+    group_rights = ChatAdministratorRights(
+        **{**rights, "can_restrict_members": True}, can_pin_messages=True
+    )
+    sent = await c.message.answer(
+        tr(
+            "➕ <b>Добавление</b>\n\nОтправьте @username канала/группы или перешлите сообщение из него.\n\nБот должен быть администратором."
+        ),
         reply_markup=ReplyKeyboardMarkup(
             keyboard=[
                 [
@@ -118,22 +84,36 @@ async def channel_picker(c: CallbackQuery, state: FSMContext):
                         request_chat=KeyboardButtonRequestChat(
                             request_id=701,
                             chat_is_channel=True,
-                            user_administrator_rights=rights,
-                            bot_administrator_rights=rights,
-                            request_title=True,
-                            request_username=True,
+                            user_administrator_rights=channel_rights,
+                            bot_administrator_rights=channel_rights,
                         ),
-                    )
+                    ),
+                    KeyboardButton(
+                        text=tr("➕ Выбрать группу"),
+                        request_chat=KeyboardButtonRequestChat(
+                            request_id=702,
+                            chat_is_channel=False,
+                            user_administrator_rights=group_rights,
+                            bot_administrator_rights=group_rights,
+                        ),
+                    ),
                 ]
             ],
             resize_keyboard=True,
             one_time_keyboard=True,
         ),
     )
+    ui.note_sent(c.from_user.id, sent)
     await c.answer()
 
 
-@router.message(F.chat_shared.request_id == 701)
+@router.callback_query(F.data == "channel:picker")
+async def channel_picker(c: CallbackQuery, state: FSMContext):
+    # Compatibility with older inline buttons.
+    await channel_add(c, state, c.bot)
+
+
+@router.message(F.chat_shared.request_id.in_({701, 702}))
 async def channel_shared(message: Message, state: FSMContext, bot: Bot):
     # ChatShared also arrives when the bot was already an administrator, unlike
     # my_chat_member. Always recheck both parties' permissions server-side.
@@ -151,8 +131,10 @@ async def connect_channel(message, state, bot, chat):
         "✅ " + html.escape(chat.title or tr("Объект")) + tr(" подключён."),
         reply_markup=ReplyKeyboardRemove(),
     )
-    await message.answer(
-        tr("📺 <b>Мои каналы/группы</b>"), reply_markup=ui.channels_kb()
+    await ui.answer(
+        message,
+        tr("📺 <b>Мои каналы/группы</b>"),
+        reply_markup=channel_list_keyboard(uid),
     )
 
 
@@ -163,9 +145,11 @@ async def register_channel(uid, bot, chat):
         "SELECT * FROM channels WHERE telegram_chat_id=? AND owner_telegram_id=?",
         (chat.id, uid),
     )
-    if (not existing or not existing["is_active"]) and accounts.channel_count(
-        uid
-    ) >= accounts.channel_limit(uid):
+    if (
+        accounts.channel_limit(uid) >= 0
+        and (not existing or not existing["is_active"])
+        and accounts.channel_count(uid) >= accounts.channel_limit(uid)
+    ):
         raise ValueError(tr("Лимит каналов/групп достигнут."))
     if not await access.owner_and_bot_ok(bot, chat.id, uid):
         raise ValueError(
@@ -227,7 +211,14 @@ async def channel_bot_added(event: ChatMemberUpdated, bot: Bot, dispatcher: Disp
     await bot.send_message(
         uid,
         "✅ " + html.escape(event.chat.title or tr("Канал")) + tr(" подключён."),
-        reply_markup=ui.channels_kb(),
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await ui.show_panel(
+        bot,
+        uid,
+        tr("📺 <b>Мои каналы/группы</b>"),
+        channel_list_keyboard(uid),
+        force_bottom=True,
     )
 
 
@@ -237,7 +228,7 @@ async def channel_text(message: Message, state: FSMContext, bot: Bot):
     try:
         chat = await bot.get_chat(text)
     except Exception:
-        await message.answer(tr("❌ Не удалось найти объект."))
+        await ui.answer(message, tr("❌ Не удалось найти объект."))
         return
     await connect_channel(message, state, bot, chat)
 
@@ -251,31 +242,46 @@ async def channel_forward(message: Message, state: FSMContext, bot: Bot):
 async def channel_list(c: CallbackQuery):
     if not await access.access_callback(c):
         return
+    await ui.edit(
+        c, tr("📺 <b>Мои каналы/группы</b>"), channel_list_keyboard(c.from_user.id)
+    )
+    await c.answer()
+
+
+def channel_list_keyboard(uid):
     rows = database.all_rows(
         "SELECT * FROM channels WHERE owner_telegram_id=? AND is_active=1 ORDER BY title",
-        (c.from_user.id,),
+        (uid,),
     )
-    if not rows:
-        await ui.edit(c, tr("📺 <b>Мои объекты</b>\n\nСписок пуст."), ui.channels_kb())
-        await c.answer()
-        return
-    buttons = []
-    for r in rows:
-        icon = "📢" if r["chat_type"] == "channel" else "👥"
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text=f"{icon} {r['title'][:32]}",
-                    callback_data=f"channel:open:{r['id']}",
-                )
-            ]
-        )
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=("📢" if r["chat_type"] == "channel" else "👥")
+                + " "
+                + r["title"][:32],
+                callback_data=f"channel:open:{r['id']}",
+            )
+        ]
+        for r in rows
+    ]
     buttons += [
         [InlineKeyboardButton(text=tr("➕ Добавить"), callback_data="channel:add")],
-        [InlineKeyboardButton(text=tr("⬅️ Назад"), callback_data="menu:channels")],
+        [InlineKeyboardButton(text=tr("⬅️ Главное меню"), callback_data="menu:main")],
     ]
-    await ui.edit(c, tr("📺 <b>Мои каналы/группы</b>"), ui.kb(buttons))
-    await c.answer()
+    return ui.kb(buttons)
+
+
+async def dismiss_picker(bot, uid):
+    if not database.setting(f"channel_setup:{uid}"):
+        return
+    sent = await bot.send_message(
+        uid, tr("⬅️ Назад"), reply_markup=ReplyKeyboardRemove()
+    )
+    database.execute("DELETE FROM app_settings WHERE key=?", (f"channel_setup:{uid}",))
+    try:
+        await bot.delete_message(uid, sent.message_id)
+    except TelegramAPIError:
+        pass
 
 
 @router.callback_query(F.data.startswith("channel:check:"))

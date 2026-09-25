@@ -1,5 +1,6 @@
 """scheduler components."""
 
+import asyncio
 import html
 import logging
 import secrets
@@ -20,20 +21,28 @@ log = logging.getLogger(__name__)
 
 async def scheduler_publish(bot):
     rows = database.all_rows(
-        "SELECT s.post_id FROM scheduled_posts s JOIN posts p ON p.id=s.post_id WHERE s.active=1 AND p.status='scheduled' AND julianday(s.publish_at)<=julianday(?) ORDER BY julianday(s.publish_at) LIMIT 20",
+        "SELECT DISTINCT s.post_id FROM scheduled_posts s JOIN posts p ON p.id=s.post_id WHERE s.active=1 AND p.status='scheduled' AND julianday(s.publish_at)<=julianday(?) ORDER BY s.publish_at LIMIT 200",
         (timeutils.iso(),),
     )
-    for r in rows:
+    slots = asyncio.Semaphore(4)
+
+    async def publish(r):
+        async with slots:
+            await publish_one(r)
+
+    async def publish_one(r):
         try:
-            await features_posts.execute_publish(r["post_id"], bot)
+            await features_posts.execute_publish(r["post_id"], bot, automatic=True)
             p = database.one(
                 "SELECT owner_telegram_id FROM posts WHERE id=?", (r["post_id"],)
             )
             await features_posts.show_post(
-                bot, p["owner_telegram_id"], r["post_id"], False
+                bot, p["owner_telegram_id"], r["post_id"], False, panel=False
             )
         except Exception:
             log.exception("Scheduled post failed: %s", r["post_id"])
+
+    await asyncio.gather(*(publish(r) for r in rows))
     database.execute(
         "UPDATE multipost_batches SET status='completed' WHERE status='scheduled' AND NOT EXISTS (SELECT 1 FROM multipost_items i JOIN posts p ON p.id=i.post_id WHERE i.batch_id=multipost_batches.id AND p.status IN ('draft','scheduled','publishing'))"
     )
@@ -161,16 +170,33 @@ async def scheduler_requests(bot):
         except Exception:
             log.exception("Approval notification failed")
     rows = database.all_rows(
-        "SELECT j.id,j.last_checked,c.owner_telegram_id FROM join_requests j JOIN channels c ON c.id=j.channel_id WHERE j.status='pending' AND c.is_active=1 AND c.auto_requests=1 ORDER BY COALESCE(j.last_checked,'') LIMIT 100"
+        "SELECT j.id,j.last_checked,c.owner_telegram_id FROM join_requests j JOIN channels c ON c.id=j.channel_id WHERE j.status='pending' AND c.is_active=1 AND c.auto_requests=1 AND (j.next_check_at IS NULL OR j.next_check_at<=?) AND j.telegram_user_id NOT IN (SELECT telegram_id FROM blocked_users) AND c.owner_telegram_id NOT IN (SELECT telegram_id FROM blocked_users) ORDER BY COALESCE(j.next_check_at,''),j.id LIMIT 100",
+        (timeutils.iso(),),
     )
     for r in rows:
         last = timeutils.parse_dt(r["last_checked"])
         hours = 8 if accounts.has_premium(r["owner_telegram_id"]) else 168
+        database.execute(
+            "UPDATE join_requests SET next_check_at=? WHERE id=?",
+            (
+                timeutils.iso(
+                    max(timeutils.now(), last or timeutils.now())
+                    + timedelta(hours=hours)
+                )
+                if not last or timeutils.now() - last >= timedelta(hours=hours)
+                else timeutils.iso(last + timedelta(hours=hours)),
+                r["id"],
+            ),
+        )
         if not last or timeutils.now() - last >= timedelta(hours=hours):
             try:
                 await features_conditions.check_request(r["id"], bot)
             except Exception:
                 log.exception("Request check failed")
+                database.execute(
+                    "UPDATE join_requests SET next_check_at=? WHERE id=?",
+                    (timeutils.iso(timeutils.now() + timedelta(minutes=5)), r["id"]),
+                )
     for r in database.all_rows(
         "SELECT invited_id FROM referrals WHERE rewarded_at IS NULL ORDER BY id LIMIT 500"
     ):

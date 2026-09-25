@@ -79,7 +79,8 @@ class ProgressMessage:
                     ],
                     [
                         InlineKeyboardButton(
-                            text=tr("Главное меню"), callback_data="download:menu"
+                            text="🏠 " + tr("Главное меню"),
+                            callback_data="download:menu",
                         )
                     ],
                 ]

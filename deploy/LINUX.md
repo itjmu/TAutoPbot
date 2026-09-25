@@ -98,3 +98,27 @@ The unit caps memory at 2 GB and permits at most 128 tasks. Adjust resources for
 your workload. Download limits default to 1 GB per source and 4 GB temporary data
 per job; allow space for two concurrent jobs and backups. Site availability and
 Telegram permissions require the live smoke test above before public launch.
+# Backup timer and heartbeat monitoring
+
+The optional `tautopbot-backup.service` and `tautopbot-backup.timer` create a
+verified SQLite snapshot daily, including committed WAL data while the bot runs.
+After installing the bot at the paths used by the supplied service:
+
+```sh
+sudo cp deploy/tautopbot-backup.service deploy/tautopbot-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now tautopbot-backup.timer
+sudo systemctl start tautopbot-backup.service
+sudo systemctl status tautopbot-backup.service
+```
+
+Snapshots accumulate in `/var/lib/tautopbot/backups`. Configure disk monitoring,
+retention and an off-server copy appropriate to your deployment. This timer does
+not implement retention or off-server storage.
+
+An external monitor can run this read-only command; a missing heartbeat or one
+older than 90 seconds returns a nonzero exit code:
+
+```sh
+sudo -u tautopbot /opt/tautopbot/.venv/bin/python /opt/tautopbot/manage.py health --database /var/lib/tautopbot/bot.db
+```

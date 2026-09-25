@@ -121,7 +121,7 @@ async def payment_setting_value(m: Message, state: FSMContext):
         (key, value),
     )
     await state.clear()
-    await m.answer(tr("✅ Сохранено."), reply_markup=ui.back("payment:settings"))
+    await ui.answer(m, tr("✅ Сохранено."), reply_markup=ui.back("payment:settings"))
 
 
 @router.callback_query(F.data == "payment:toggle")
@@ -329,6 +329,9 @@ async def premium_buy(c: CallbackQuery, bot: Bot):
 
 @router.pre_checkout_query()
 async def pre_checkout(q: PreCheckoutQuery, bot: Bot):
+    if accounts.blocked(q.from_user.id):
+        await q.answer(ok=False, error_message=tr("Заказ недействителен."))
+        return
     p = database.one(
         "SELECT * FROM payments WHERE payload=? AND telegram_id=? AND status='pending'",
         (q.invoice_payload, q.from_user.id),
@@ -342,7 +345,7 @@ async def pre_checkout(q: PreCheckoutQuery, bot: Bot):
 @router.message(F.successful_payment)
 async def successful_payment(m: Message, bot: Bot):
     p = m.successful_payment
-    accounts.ensure_user(m.from_user)
+    await accounts.ensure_user_async(m.from_user)
     with database.atomic():
         row = database.one(
             "SELECT * FROM payments WHERE payload=? AND telegram_id=? AND status='pending'",

@@ -1,0 +1,16 @@
+[Unit]
+Description=Verified SQLite backup for TAutoPbot
+
+[Service]
+Type=oneshot
+User=tautopbot
+Group=tautopbot
+WorkingDirectory=/opt/tautopbot
+Environment=DB_FILE=/var/lib/tautopbot/bot.db
+ExecStart=/opt/tautopbot/.venv/bin/python /opt/tautopbot/manage.py backup-live --database /var/lib/tautopbot/bot.db
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tautopbot

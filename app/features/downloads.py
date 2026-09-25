@@ -32,11 +32,23 @@ DOWNLOAD_SLOTS = asyncio.Semaphore(2)
 
 
 @router.callback_query(F.data == "download:menu")
-async def progress_menu(c: CallbackQuery):
+async def progress_menu(c: CallbackQuery, state: FSMContext = None):
     # Keep navigation separate so subsequent progress edits cannot replace it.
-    await c.message.answer(
-        tr("🤖 <b>Главное меню</b>\n\nВыберите раздел:"), reply_markup=ui.main_kb()
-    )
+    if state is not None:
+        await state.clear()
+    bot = getattr(c, "bot", None) or getattr(c.message, "bot", None)
+    if bot is not None:
+        ui.note_message(c.message.chat.id, c.message.message_id)
+        await ui.show_panel(
+            bot,
+            c.message.chat.id,
+            tr("🤖 <b>Главное меню</b>\n\nВыберите раздел:"),
+            ui.main_kb(),
+        )
+    else:
+        await c.message.answer(
+            tr("🤖 <b>Главное меню</b>\n\nВыберите раздел:"), reply_markup=ui.main_kb()
+        )
     await c.answer()
 
 
@@ -222,12 +234,20 @@ async def download_selected(c: CallbackQuery, bot: Bot):
     await c.answer(tr("Загрузка запущена в фоне."))
     download_jobs.start(
         uid,
-        lambda: download_in_background(bot, uid, did, index, dict(row), info),
+        lambda: download_in_background(
+            bot,
+            uid,
+            did,
+            index,
+            dict(row),
+            info,
+            getattr(getattr(c, "message", None), "message_id", None),
+        ),
         tr("В очереди на скачивание"),
     )
 
 
-async def download_in_background(bot, uid, did, index, row, info):
+async def download_in_background(bot, uid, did, index, row, info, control_id=None):
     database.execute(
         "UPDATE downloads SET status='running',error=NULL WHERE id=?", (did,)
     )
@@ -338,6 +358,7 @@ async def download_in_background(bot, uid, did, index, row, info):
                                 bot, uid, path, title, meta
                             )
                             delivered += 1
+                            ui.note_message(uid, sent.message_id)
                             database.execute(
                                 "INSERT OR IGNORE INTO download_deliveries VALUES(?,?,?,?,?)",
                                 (*key, sent.message_id),
@@ -367,6 +388,8 @@ async def download_in_background(bot, uid, did, index, row, info):
             )
         database.execute("UPDATE downloads SET status='done' WHERE id=?", (did,))
         await progress.update("done", force=True, terminal=True)
+        await ui.clear_controls(bot, uid, control_id)
+        await ui.refresh_panel(bot, uid)
     except asyncio.CancelledError:
         database.execute(
             "UPDATE downloads SET status='cancelled',error='Загрузка остановлена; можно повторить' WHERE id=?",

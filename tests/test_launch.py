@@ -51,22 +51,32 @@ class LaunchTests(unittest.IsolatedAsyncioTestCase):
             for row in markup.inline_keyboard
             for b in row
         }
-        self.assertEqual(actions, {"post", "links", "skip"})
+        self.assertEqual(actions, {"post", "links", "skip", "main"})
 
-    async def test_private_channel_picker_requests_id_and_admin_rights(self):
+    async def test_channel_picker_uses_two_bottom_buttons(self):
         c = SimpleNamespace(
+            bot=self.bot,
             from_user=SimpleNamespace(id=42),
             message=SimpleNamespace(answer=AsyncMock()),
             answer=AsyncMock(),
         )
-        with patch.object(
-            channels.access, "access_callback", new=AsyncMock(return_value=True)
+        with (
+            patch.object(
+                channels.access, "access_callback", new=AsyncMock(return_value=True)
+            ),
+            patch.object(ui, "edit", new=AsyncMock()) as edit,
         ):
             await channels.channel_picker(c, self.state)
-        button = c.message.answer.await_args.kwargs["reply_markup"].keyboard[0][0]
-        self.assertEqual(button.request_chat.request_id, 701)
-        self.assertIsNone(button.request_chat.chat_has_username)
-        self.assertTrue(button.request_chat.bot_administrator_rights.can_post_messages)
+        keyboard = c.message.answer.await_args.kwargs["reply_markup"]
+        self.assertEqual(
+            [b.request_chat.request_id for b in keyboard.keyboard[0]], [701, 702]
+        )
+        self.assertEqual(len(edit.await_args.args[2].inline_keyboard), 1)
+        await channels.dismiss_picker(self.bot, 42)
+        self.assertTrue(
+            self.bot.send_message.await_args.kwargs["reply_markup"].remove_keyboard
+        )
+        self.assertFalse(channels.database.setting("channel_setup:42"))
 
     async def test_shared_private_channel_connects_without_membership_update(self):
         chat = SimpleNamespace(

@@ -290,7 +290,9 @@ tests/                    # Regression tests and offline dispatcher integration
 .github/workflows/        # Tests, formatting and lint on Python 3.11 / 3.13
 ```
 
-SQLite access stays on the event-loop thread; transactions contain no awaits.
+User registration and FSM storage use a bounded, batched SQLite worker queue.
+Other SQLite transactions remain synchronous and contain no awaits; their busy
+timeout is limited to 100 ms. This does not remove SQLite's single-writer limit.
 The connection is created during application startup, not when importing modules.
 Feature routers use explicit module dependencies. The shared router middleware
 runs once, commands precede state input, and fallback handlers are registered last.

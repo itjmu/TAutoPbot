@@ -19,14 +19,16 @@ async def idle_message(m: Message, bot: Bot):
 
 @router.message(PostCreate.idle)
 async def active_post_hint(m: Message):
-    await m.answer(
-        tr("Пост открыт. Выберите действие под ним или нажмите /cancel, чтобы выйти.")
+    await ui.answer(
+        m,
+        tr("Пост открыт. Выберите действие под ним или нажмите /cancel, чтобы выйти."),
     )
 
 
 @router.message(F.text.startswith("/"))
 async def unknown_command(m: Message):
-    await m.answer(
+    await ui.answer(
+        m,
         tr("Команда не найдена. Используйте /start или /cancel."),
         reply_markup=ui.main_kb(),
     )

@@ -1,0 +1,50 @@
+{
+  "bot_id": 7713745354,
+  "results": [
+    {
+      "chat_id": -1002364710488,
+      "left": true
+    },
+    {
+      "chat_id": -1002327810816,
+      "left": true
+    },
+    {
+      "chat_id": -1002316242801,
+      "left": true
+    },
+    {
+      "chat_id": -1002064527286,
+      "left": true
+    },
+    {
+      "chat_id": -1001684957875,
+      "left": true
+    },
+    {
+      "chat_id": -1001501960884,
+      "left": true
+    },
+    {
+      "chat_id": -1001496550296,
+      "left": true
+    },
+    {
+      "chat_id": -1001443744494,
+      "error_type": "TelegramBadRequest",
+      "error": "Bad Request: chat not found"
+    },
+    {
+      "chat_id": -1001275427302,
+      "left": true
+    },
+    {
+      "chat_id": -1001213786505,
+      "left": true
+    },
+    {
+      "chat_id": -1001136154916,
+      "left": true
+    }
+  ]
+}

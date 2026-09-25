@@ -32,7 +32,7 @@ def run_ffmpeg(executable, arguments):
         raise ValueError("FFmpeg: " + result.stderr.decode(errors="replace")[-400:])
 
 
-def probe(path, executable):
+def probe(path, executable, *, codecs=False):
     # read_frames honors IMAGEIO_FFMPEG_EXE; configured binaries must be consistent.
     import os
 
@@ -45,14 +45,20 @@ def probe(path, executable):
     try:
         data = next(frames)
         width, height = data["size"]
-        return {"width": width, "height": height, "duration": float(data["duration"])}
+        result = {"width": width, "height": height, "duration": float(data["duration"])}
+        if codecs:
+            result.update(
+                codec=data.get("codec"),
+                pix_fmt=(data.get("pix_fmt") or "").split("(", 1)[0].strip(),
+            )
+        return result
     finally:
         frames.close()
 
 
 def prepare_video(path, executable, limit):
-    """Encode H.264/AAC MP4 without cropping; every returned part is size-checked."""
-    meta = probe(path, executable)
+    """Prepare H.264/AAC MP4 without cropping; every returned part is size-checked."""
+    meta = probe(path, executable, codecs=True)
     duration = meta["duration"]
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError(tr("Не удалось определить длительность видео."))
@@ -61,10 +67,45 @@ def prepare_video(path, executable, limit):
     seconds = max(1, int(limit * 0.85 * 8 / (bitrate + 128_000)))
     output = path.parent / (path.stem + "_telegram")
     output.mkdir(exist_ok=True)
+    small_source = path.stat().st_size <= limit
+    if small_source and meta["codec"] == "h264" and meta["pix_fmt"] == "yuv420p":
+        target = output / "part_0001.mp4"
+        try:
+            # Keep compatible video intact instead of inflating it by re-encoding.
+            run_ffmpeg(
+                executable,
+                [
+                    "-protocol_whitelist",
+                    "file,pipe",
+                    "-i",
+                    str(path),
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "0:a:0?",
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "128k",
+                    "-movflags",
+                    "+faststart",
+                    str(target),
+                ],
+            )
+            if 0 < target.stat().st_size <= limit:
+                return [target]
+        except ValueError:
+            # If remuxing is unsupported, use the existing normalization path.
+            pass
     files = []
     start = 0.0
     while start < duration - 0.001:
-        length = min(seconds, duration - start)
+        # A size estimate alone must not split a small source. Try it whole first.
+        length = (
+            duration if small_source and start == 0 else min(seconds, duration - start)
+        )
         target = output / f"part_{len(files) + 1:04d}.mp4"
         while True:
             run_ffmpeg(

@@ -28,6 +28,8 @@ class BackgroundJobs:
                     "У вас уже есть загрузка. Дождитесь её или отмените в разделе скачивания."
                 )
             )
+        if len(self.tasks) >= 32:
+            raise ValueError(tr("Очередь загрузок заполнена. Попробуйте позже."))
         task = asyncio.create_task(factory(), name=f"download:{user_id}")
         self.tasks[user_id] = task
         self.labels[user_id] = label

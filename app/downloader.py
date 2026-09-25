@@ -467,7 +467,13 @@ def ydl_options(folder, url=""):
     return opts
 
 
-def media_choices(info):
+def audio_preference(fmt):
+    # Extractors mark the creator's original track above defaults and dubs.
+    preference = fmt.get("language_preference")
+    return preference if preference is not None else -1
+
+
+def media_choices(info, max_height=None):
     if info.get("is_live") or info.get("live_status") in {"is_live", "is_upcoming"}:
         raise ValueError(tr("Прямые эфиры не скачиваются. Пришлите завершённое видео."))
     formats = [
@@ -504,7 +510,11 @@ def media_choices(info):
     ]
     best_audio = max(
         audio,
-        key=lambda f: (f.get("ext") == "m4a", f.get("abr") or f.get("tbr") or 0),
+        key=lambda f: (
+            audio_preference(f),
+            f.get("ext") == "m4a",
+            f.get("abr") or f.get("tbr") or 0,
+        ),
         default=None,
     )
     choices = []
@@ -519,7 +529,14 @@ def media_choices(info):
         if not has_audio and not best_audio:
             continue
         height = int(f.get("height") or 0)
-        score = (f.get("ext") == "mp4", has_audio, f.get("tbr") or 0)
+        if max_height is not None and (not height or height > max_height):
+            continue
+        score = (
+            audio_preference(f if has_audio else best_audio),
+            f.get("ext") == "mp4",
+            has_audio,
+            f.get("tbr") or 0,
+        )
         if height not in heights or score > heights[height][0]:
             heights[height] = (score, f)
     for height, (_, f) in sorted(heights.items(), reverse=True)[:8]:
@@ -531,10 +548,13 @@ def media_choices(info):
                 "label": f"🎬 {height}p" if height else tr("🎬 Видео"),
                 "format": selector,
                 "kind": "video",
+                "height": height,
             }
         )
-    source_audio = best_audio or next(
-        (f for f in formats if f.get("acodec") not in {None, "none"}), None
+    source_audio = best_audio or max(
+        (f for f in formats if f.get("acodec") not in {None, "none"}),
+        key=audio_preference,
+        default=None,
     )
     if source_audio:
         choices.append(
@@ -549,6 +569,28 @@ def media_choices(info):
             tr("Нет доступных форматов. Возможно, нужен вход или меньшее качество.")
         )
     return choices
+
+
+def playlist_choices():
+    return [
+        {
+            "label": tr("🎬 Весь плейлист · до {height}p", height=height),
+            "kind": "video",
+            "max_height": height,
+        }
+        for height in (2160, 1440, 1080, 720, 480, 360, 240, 144)
+    ] + [{"label": tr("🎵 Весь плейлист MP3"), "kind": "audio", "max_height": None}]
+
+
+def playlist_format(info, selected):
+    # Resolve IDs separately for each entry; never exceed the chosen resolution.
+    choices = media_choices(info, max_height=selected["max_height"])
+    for choice in choices:
+        if choice["kind"] == selected["kind"]:
+            return choice["format"]
+    raise ValueError(
+        tr("Нет доступных форматов. Возможно, нужен вход или меньшее качество.")
+    )
 
 
 def gallery_items(url):
@@ -696,18 +738,7 @@ def inspect_download(url, folder):
                 "backend": "playlist",
                 "title": str(info.get("title") or tr("Плейлист"))[:180],
                 "entries": entries,
-                "choices": [
-                    {
-                        "label": tr("🎬 Весь плейлист ({v0})", v0=len(entries)),
-                        "kind": "video",
-                        "format": "bestvideo[height<=1080]+bestaudio/best",
-                    },
-                    {
-                        "label": tr("🎵 Весь плейлист MP3"),
-                        "kind": "audio",
-                        "format": "bestaudio/best",
-                    },
-                ],
+                "choices": playlist_choices(),
             }
         return {
             "backend": "yt",
@@ -827,7 +858,16 @@ def download_files(request, folder):
     if info["backend"] != "yt":
         raise ValueError(tr("Неизвестный источник."))
     opts = ydl_options(folder, url)
-    opts["format"] = selected["format"]
+    if "max_height" in selected:
+
+        def select_format(context):
+            selector = playlist_format(context, selected)
+            return ydl.build_format_selector(selector)(context)
+
+        opts["format"] = select_format
+    else:
+        # Keep saved single-video choices and older playlist buttons compatible.
+        opts["format"] = selected["format"]
     if selected["kind"] == "audio":
         opts["postprocessors"] = [
             {

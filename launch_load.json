@@ -1,0 +1,10 @@
+{
+  "kind": "local synthetic DB/FSM burst; no network",
+  "users": 2000,
+  "seconds": 0.373,
+  "users_per_second": 5364.7,
+  "heartbeat_max_gap_seconds": 0.044,
+  "saved_users": 2000,
+  "saved_fsm_rows": 2000,
+  "synchronous_lock_block_seconds_at_250ms_timeout": 0.357
+}

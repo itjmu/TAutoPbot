@@ -1,0 +1,8 @@
+{
+  "backup": "C:\\Users\\User\\Desktop\\Telegram bots\\TAutoPbot\\backups\\bot-20260925T131432283150Z.sqlite3",
+  "restoration": "ok",
+  "migration_twice": "ok",
+  "integrity": "ok",
+  "tables_before": 45,
+  "tables_after": 48
+}

@@ -13,7 +13,7 @@ async def access_message(message: Message) -> bool:
     if accounts.blocked(message.from_user.id):
         await message.answer(tr("⛔ Доступ запрещён."))
         return False
-    accounts.ensure_user(message.from_user)
+    await accounts.ensure_user_async(message.from_user)
     return True
 
 
@@ -21,7 +21,7 @@ async def access_callback(c: CallbackQuery) -> bool:
     if accounts.blocked(c.from_user.id):
         await c.answer(tr("⛔ Доступ запрещён."), show_alert=True)
         return False
-    accounts.ensure_user(c.from_user)
+    await accounts.ensure_user_async(c.from_user)
     return True
 
 

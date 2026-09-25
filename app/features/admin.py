@@ -1,11 +1,10 @@
 """features / admin components."""
 
-import asyncio
 import html
+import json
+import secrets
 
 from aiogram import Bot, F, Router
-from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
@@ -95,8 +94,8 @@ async def plan_save(m, state):
     data = await state.get_data()
     plans.set_value(data["plan_key"], int(m.text), m.from_user.id)
     await state.clear()
-    await m.answer(
-        tr("Настройки тарифа сохранены."), reply_markup=ui.back("admin:plans")
+    await ui.answer(
+        m, tr("Настройки тарифа сохранены."), reply_markup=ui.back("admin:plans")
     )
 
 
@@ -145,15 +144,9 @@ async def admin_users(c: CallbackQuery):
     if not access.admin_only(c):
         await c.answer(tr("Нет доступа"), show_alert=True)
         return
-    rows = database.all_rows(
-        "SELECT telegram_id,username,created_at,last_active_at FROM users ORDER BY id DESC LIMIT 30"
-    )
-    text = tr("👥 <b>Пользователи</b>\n\n") + "\n".join(
-        f"<code>{r['telegram_id']}</code> @{html.escape(r['username'] or tr('нет'))}"
-        for r in rows
-    )
-    await ui.edit(c, text[:4000], ui.admin_kb())
-    await c.answer()
+    from app.features.user_admin import user_list
+
+    await user_list(c, 0)
 
 
 @router.callback_query(F.data == "admin:channels")
@@ -217,37 +210,164 @@ async def admin_broadcast(c: CallbackQuery, state: FSMContext):
         return
     await state.set_state(Broadcast.content)
     await ui.edit(
-        c, tr("📢 Отправьте текст рассылки. /cancel — отмена"), ui.back("admin:main")
+        c,
+        tr(
+            "📢 Отправьте или перешлите сообщение любого типа, затем подтвердите рассылку. /cancel — отмена"
+        ),
+        ui.back("admin:main"),
     )
     await c.answer()
 
 
-@router.message(Broadcast.content, F.text)
+@router.message(Broadcast.content, ~F.successful_payment, ~F.text.startswith("/"))
 async def broadcast_send(m: Message, state: FSMContext, bot: Bot):
     if m.from_user.id != ADMIN_ID:
         return
-    users = database.all_rows(
-        "SELECT telegram_id FROM users WHERE is_blocked=0 AND telegram_id NOT IN (SELECT telegram_id FROM blocked_users)"
-    )
-    ok = fail = 0
-    for r in users:
-        try:
-            await bot.send_message(
-                r["telegram_id"], html.escape(m.text), parse_mode=ParseMode.HTML
-            )
-            ok += 1
-        except (TelegramForbiddenError, TelegramBadRequest):
-            fail += 1
-        await asyncio.sleep(0.05)
+    key = f"broadcast_draft:{m.from_user.id}"
+    saved = database.setting(key)
+    draft = json.loads(saved) if saved else {}
+    if not m.media_group_id or draft.get("group") != m.media_group_id:
+        draft = {
+            "token": secrets.token_hex(4),
+            "chat_id": m.chat.id,
+            "ids": [],
+            "group": m.media_group_id,
+        }
+    if m.message_id not in draft["ids"]:
+        draft["ids"].append(m.message_id)
     database.execute(
-        "INSERT INTO notifications(telegram_id,kind,text,created_at,sent) VALUES(?,?,?,?,1)",
-        (ADMIN_ID, "broadcast", m.text, timeutils.iso()),
+        "INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, json.dumps(draft)),
     )
+    await ui.answer(
+        m,
+        tr(
+            "📢 Сообщение готово к рассылке. Файлов/сообщений: {count}",
+            count=len(draft["ids"]),
+        ),
+        reply_markup=ui.kb(
+            [
+                [
+                    ui.choice(
+                        tr("📢 Отправить рассылку"), f"broadcast:send:{draft['token']}"
+                    )
+                ],
+                [ui.choice(tr("❌ Отмена"), "admin:main")],
+            ]
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("broadcast:send:"))
+async def broadcast_confirm(c: CallbackQuery, state: FSMContext, bot: Bot):
+    if c.from_user.id != ADMIN_ID:
+        raise ValueError(tr("Нет доступа."))
+    key = f"broadcast_draft:{c.from_user.id}"
+    if await state.get_state() != Broadcast.content.state:
+        raise ValueError(tr("Этот шаг устарел. Откройте настройку заново."))
+    saved = database.setting(key)
+    draft = json.loads(saved) if saved else {}
+    if draft.get("token") != c.data.rsplit(":", 1)[-1]:
+        raise ValueError(tr("Этот шаг устарел. Откройте настройку заново."))
+    from services import broadcasts
+
+    broadcasts.enqueue(c.from_user.id, draft)
+    database.execute("DELETE FROM app_settings WHERE key=?", (key,))
     await state.clear()
-    await m.answer(
-        tr("✅ Рассылка завершена. Успешно: {v0}, ошибок: {v1}.", v0=ok, v1=fail),
-        reply_markup=ui.admin_kb(),
-    )
+    await c.answer()
+    await ui.edit(c, tr("📢 Рассылка выполняется."), ui.back("admin:main"))
+    await broadcasts.tick(bot)
+
+
+@router.callback_query(F.data.startswith("mail:"))
+async def broadcast_status(c: CallbackQuery):
+    if not access.admin_only(c):
+        raise ValueError(tr("Нет доступа."))
+    parts = c.data.split(":")
+    action = parts[1]
+    if action == "list":
+        rows = [
+            [ui.choice(f"#{r['id']} · {r['created_at'][:16]}", f"mail:open:{r['id']}")]
+            for r in database.all_rows(
+                "SELECT id,created_at FROM broadcast_jobs ORDER BY id DESC LIMIT 30"
+            )
+        ]
+        rows.append([ui.choice(tr("Назад"), "admin:main")])
+        await ui.edit(c, tr("📬 Состояние рассылок"), ui.kb(rows))
+    else:
+        jid = int(parts[2])
+        job = database.one(
+            "SELECT * FROM broadcast_jobs WHERE id=? AND owner_id=?",
+            (jid, c.from_user.id),
+        )
+        if not job:
+            raise ValueError(tr("Не найдено."))
+        if action in {"retry", "sent", "confirm"}:
+            uid = int(parts[3])
+            row = database.one(
+                "SELECT status FROM broadcast_targets WHERE job_id=? AND user_id=?",
+                (jid, uid),
+            )
+            if not row or row[0] not in {"failed", "uncertain"}:
+                raise ValueError(tr("Этот шаг устарел. Откройте настройку заново."))
+            if action == "confirm":
+                await ui.edit(
+                    c,
+                    tr("Проверьте доставку вручную. Повтор может создать дубликат."),
+                    ui.kb(
+                        [
+                            [
+                                ui.choice(
+                                    tr("Повторить после проверки"),
+                                    f"mail:retry:{jid}:{uid}",
+                                )
+                            ],
+                            [ui.choice(tr("Уже доставлено"), f"mail:sent:{jid}:{uid}")],
+                            [ui.choice(tr("Назад"), f"mail:open:{jid}")],
+                        ]
+                    ),
+                )
+                await c.answer()
+                return
+            database.execute(
+                "UPDATE broadcast_targets SET status=?,retry_at=NULL,error=NULL WHERE job_id=? AND user_id=?",
+                ("pending" if action == "retry" else "sent", jid, uid),
+            )
+            database.execute(
+                "UPDATE broadcast_jobs SET status='queued' WHERE id=?", (jid,)
+            )
+        elif action != "open":
+            raise ValueError(tr("Неизвестное действие."))
+        counts = {
+            r["status"]: r["n"]
+            for r in database.all_rows(
+                "SELECT status,COUNT(*) n FROM broadcast_targets WHERE job_id=? GROUP BY status",
+                (jid,),
+            )
+        }
+        text = tr(
+            "Рассылка #{id}: отправлено {sent}, ожидают {pending}, ошибок {failed}, требуют проверки {uncertain}.",
+            id=jid,
+            sent=counts.get("sent", 0),
+            pending=counts.get("pending", 0) + counts.get("sending", 0),
+            failed=counts.get("failed", 0),
+            uncertain=counts.get("uncertain", 0),
+        )
+        rows = [
+            [ui.choice(str(r["user_id"]), f"mail:confirm:{jid}:{r['user_id']}")]
+            for r in database.all_rows(
+                "SELECT user_id FROM broadcast_targets WHERE job_id=? AND status IN ('failed','uncertain') ORDER BY user_id LIMIT 10",
+                (jid,),
+            )
+        ]
+        rows += [
+            [
+                ui.choice(tr("Обновить"), f"mail:open:{jid}"),
+                ui.choice(tr("Назад"), "mail:list"),
+            ]
+        ]
+        await ui.edit(c, text, ui.kb(rows))
+    await c.answer()
 
 
 @router.callback_query(F.data == "admin:premium")
@@ -394,7 +514,8 @@ async def promo_step(m, state):
         values = list(
             dict.fromkeys([int(database.setting("promo_default_days")), 1, 3, 7, 30])
         )
-        await m.answer(
+        await ui.answer(
+            m,
             tr("Сколько дней Premium даёт этот код? Можно написать своё число."),
             reply_markup=ui.kb(
                 ui.button_grid(
@@ -408,7 +529,8 @@ async def promo_step(m, state):
         )
         return
     if step == "uses":
-        await m.answer(
+        await ui.answer(
+            m,
             tr(
                 "Сколько всего активаций разрешено?\nНажмите вариант или напишите число."
             ),
@@ -429,7 +551,8 @@ async def promo_step(m, state):
         )
         return
     if step == "expiry":
-        await m.answer(
+        await ui.answer(
+            m,
             tr(
                 "До какой даты можно активировать код?\nНапишите дату ДД.ММ.ГГГГ или выберите:"
             ),
@@ -439,7 +562,8 @@ async def promo_step(m, state):
         )
         return
     if step == "audience":
-        await m.answer(
+        await ui.answer(
+            m,
             tr("Кому доступен код?"),
             reply_markup=ui.kb(
                 [
@@ -452,7 +576,8 @@ async def promo_step(m, state):
         )
         return
     if step == "condition":
-        await m.answer(
+        await ui.answer(
+            m,
             tr("Что нужно сделать для активации?"),
             reply_markup=conditions_buttons("aw", token, True),
         )
@@ -469,7 +594,8 @@ async def promo_step(m, state):
             else tr("без срока"),
             v5=accounts.CONDITION_LABELS[p["condition"]],
         )
-        await m.answer(
+        await ui.answer(
+            m,
             html.escape(text),
             reply_markup=ui.kb(
                 [

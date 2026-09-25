@@ -25,12 +25,13 @@ router = Router(name="features.common")
 
 
 @router.message(CommandStart())
+@router.message(Command("menu"))
 async def start(message: Message, state: FSMContext, bot: Bot):
     uid = message.from_user.id
     if accounts.blocked(uid):
         return
     existing = database.one("SELECT 1 FROM users WHERE telegram_id=?", (uid,))
-    accounts.ensure_user(message.from_user)
+    await accounts.ensure_user_async(message.from_user)
     payload = (message.text or "").split(maxsplit=1)
     if len(payload) == 2 and re.fullmatch(r"contest_\d+(?:_\d+)?", payload[1]):
         from app.features.contests import show_entry
@@ -60,25 +61,29 @@ async def start(message: Message, state: FSMContext, bot: Bot):
                     (inviter, uid, timeutils.iso()),
                 )
     await state.clear()
-    await message.answer(
-        tr("🤖 Telegram Automation Bot\nВыберите раздел:"),
+    await ui.answer(
+        message,
+        tr("🤖 <b>Главное меню</b>\n\nВыберите раздел:"),
         reply_markup=ui.main_kb(),
     )
+    await ui.dismiss_command(message)
 
 
 @router.message(Command("cancel"))
 async def cancel(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(tr("❌ Отменено."), reply_markup=ui.main_kb())
+    await ui.answer(message, tr("❌ Отменено."), reply_markup=ui.main_kb())
+    await ui.dismiss_command(message)
 
 
 @router.message(Command("stopdownload", "stop_download"))
 async def stop_download(message: Message):
     stopped = download_jobs.cancel(message.from_user.id)
-    await message.answer(
+    await ui.answer(
+        message,
         tr("⏹ Останавливаю скачивание и отправку. Уже отправленные файлы сохранены.")
         if stopped
-        else tr("Нет активной загрузки.")
+        else tr("Нет активной загрузки."),
     )
 
 
@@ -194,8 +199,11 @@ async def offer_incoming(m, bot):
             ui.choice(tr("Пропустить"), f"in:{iid}:skip"),
         ]
     )
-    await bot.send_message(
-        m.from_user.id, tr("Что сделать с этим сообщением?"), reply_markup=ui.kb(rows)
+    await ui.show_panel(
+        bot,
+        m.from_user.id,
+        tr("Что сделать с этим сообщением?"),
+        reply_markup=ui.kb(rows),
     )
 
 
@@ -249,6 +257,6 @@ async def incoming_action(c: CallbackQuery, bot: Bot):
                     "UPDATE incoming SET post_id=? WHERE id=?", (pid, iid)
                 )
         await c.answer()
-        await ui.send_target_picker(bot, uid, pid)
+        await ui.send_target_picker(bot, uid, pid, panel=True)
         return
     raise ValueError(tr("Неизвестное действие."))

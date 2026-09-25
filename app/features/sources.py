@@ -2,10 +2,16 @@
 
 import html
 import json
+import logging
 from datetime import timedelta
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramRetryAfter,
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
@@ -44,7 +50,9 @@ async def deliver_source_draft(source, key, payload, bot):
             (source["id"], key, pid),
         )
     try:
-        await features_posts.show_post(bot, source["owner_telegram_id"], pid)
+        await features_posts.show_post(
+            bot, source["owner_telegram_id"], pid, panel=False
+        )
     except Exception as exc:
         database.execute(
             "UPDATE post_sources SET last_error=? WHERE id=?",
@@ -123,51 +131,82 @@ def queue_album(message, uid, targets, source_id=0):
 
 async def flush_albums(bot):
     rows = database.all_rows(
-        "SELECT * FROM album_intake WHERE ready_at<=?", (timeutils.iso(),)
+        "SELECT * FROM album_intake WHERE ready_at<=? ORDER BY ready_at LIMIT 100",
+        (timeutils.iso(),),
     )
     for row in rows:
-        items = sorted(
-            content.entity_list(row["items_json"]), key=lambda x: x["message_id"]
+        key = (row["owner_id"], row["chat_id"], row["group_id"], row["source_id"])
+        try:
+            await flush_album(bot, row)
+        except (TelegramForbiddenError, TelegramBadRequest) as exc:
+            # Keep the actual draft; retire only the undeliverable intake control.
+            database.log_event(
+                row["owner_id"], "ALBUM_NOTIFICATION_FAILED", str(exc)[:250]
+            )
+            database.execute(
+                "DELETE FROM album_intake WHERE owner_id=? AND chat_id=? AND group_id=? AND source_id=?",
+                key,
+            )
+        except Exception as exc:
+            delay = (
+                exc.retry_after + 1
+                if isinstance(exc, TelegramRetryAfter)
+                else min(3600, 5 * 2 ** min(row["attempts"], 9))
+            )
+            database.execute(
+                "UPDATE album_intake SET ready_at=?,attempts=attempts+1,error=? WHERE owner_id=? AND chat_id=? AND group_id=? AND source_id=?",
+                (
+                    timeutils.iso(timeutils.now() + timedelta(seconds=delay)),
+                    str(exc)[:250],
+                    *key,
+                ),
+            )
+            logging.getLogger(__name__).exception(
+                "Album intake failed for %s", row["owner_id"]
+            )
+
+
+async def flush_album(bot, row):
+    items = sorted(
+        content.entity_list(row["items_json"]), key=lambda x: x["message_id"]
+    )
+    payload = dict(items[0])
+    targets = content.entity_list(row["targets_json"])
+    if len(items) > 1:
+        payload.update(
+            content_type="album", media_json=json.dumps(items, ensure_ascii=False)
         )
-        payload = dict(items[0])
-        targets = content.entity_list(row["targets_json"])
-        if len(items) > 1:
-            payload.update(
-                content_type="album", media_json=json.dumps(items, ensure_ascii=False)
-            )
-        if row["source_id"]:
-            source = database.one(
-                "SELECT * FROM post_sources WHERE id=?", (row["source_id"],)
-            )
-            if source:
-                await deliver_source_draft(
-                    source, "album:" + row["group_id"], payload, bot
+    if row["source_id"]:
+        source = database.one(
+            "SELECT * FROM post_sources WHERE id=?", (row["source_id"],)
+        )
+        if source:
+            await deliver_source_draft(source, "album:" + row["group_id"], payload, bot)
+    elif row["post_id"] or accounts.use_daily(row["owner_id"], "post_create"):
+        pid = row["post_id"]
+        if not pid:
+            with database.atomic():
+                pid = content.create_draft(row["owner_id"], payload, targets)
+                database.db.execute(
+                    "UPDATE album_intake SET post_id=? WHERE owner_id=? AND chat_id=? AND group_id=? AND source_id=?",
+                    (
+                        pid,
+                        row["owner_id"],
+                        row["chat_id"],
+                        row["group_id"],
+                        row["source_id"],
+                    ),
                 )
-        elif row["post_id"] or accounts.use_daily(row["owner_id"], "post_create"):
-            pid = row["post_id"]
-            if not pid:
-                with database.atomic():
-                    pid = content.create_draft(row["owner_id"], payload, targets)
-                    database.db.execute(
-                        "UPDATE album_intake SET post_id=? WHERE owner_id=? AND chat_id=? AND group_id=? AND source_id=?",
-                        (
-                            pid,
-                            row["owner_id"],
-                            row["chat_id"],
-                            row["group_id"],
-                            row["source_id"],
-                        ),
-                    )
-            await ui.send_target_picker(bot, row["owner_id"], pid)
-        else:
-            await bot.send_message(
-                row["owner_id"],
-                tr("Лимит Free: 3 новых поста в день. Альбом не добавлен."),
-            )
-        database.execute(
-            "DELETE FROM album_intake WHERE owner_id=? AND chat_id=? AND group_id=? AND source_id=?",
-            (row["owner_id"], row["chat_id"], row["group_id"], row["source_id"]),
+        await ui.send_target_picker(bot, row["owner_id"], pid)
+    else:
+        await bot.send_message(
+            row["owner_id"],
+            tr("Лимит Free: 3 новых поста в день. Альбом не добавлен."),
         )
+    database.execute(
+        "DELETE FROM album_intake WHERE owner_id=? AND chat_id=? AND group_id=? AND source_id=?",
+        (row["owner_id"], row["chat_id"], row["group_id"], row["source_id"]),
+    )
 
 
 @router.channel_post()
@@ -261,11 +300,11 @@ async def source_add(c: CallbackQuery, state: FSMContext):
     cid = int(c.data.split(":")[2])
     if not accounts.channel_allowed(uid, cid):
         raise ValueError(tr("Канал недоступен."))
-    if database.one(
+    if accounts.source_limit(uid) >= 0 and database.one(
         "SELECT COUNT(*) n FROM post_sources WHERE owner_telegram_id=? AND active=1",
         (uid,),
     )["n"] >= accounts.source_limit(uid):
-        raise ValueError(tr("Лимит источников: 2 Free / 10 Premium."))
+        raise ValueError(tr("Лимит источников достигнут."))
     await state.set_data({"source_target": cid})
     await state.set_state(SourceCreate.source)
     await ui.edit(
@@ -308,10 +347,15 @@ async def source_value(m: Message, state: FSMContext, bot: Bot):
         "SELECT * FROM post_sources WHERE owner_telegram_id=? AND source_chat_id=?",
         (uid, chat.id),
     )
-    if (not existing or not existing["active"]) and database.one(
-        "SELECT COUNT(*) n FROM post_sources WHERE owner_telegram_id=? AND active=1",
-        (uid,),
-    )["n"] >= accounts.source_limit(uid):
+    if (
+        accounts.source_limit(uid) >= 0
+        and (not existing or not existing["active"])
+        and database.one(
+            "SELECT COUNT(*) n FROM post_sources WHERE owner_telegram_id=? AND active=1",
+            (uid,),
+        )["n"]
+        >= accounts.source_limit(uid)
+    ):
         raise ValueError(tr("Лимит источников достигнут."))
     with database.atomic():
         database.db.execute(
@@ -328,4 +372,4 @@ async def source_value(m: Message, state: FSMContext, bot: Bot):
         )
     await state.clear()
     text, markup = ui.source_card(sid, uid)
-    await m.answer(tr("✅ Источник подключён.\n") + text, reply_markup=markup)
+    await ui.answer(m, tr("✅ Источник подключён.\n") + text, reply_markup=markup)

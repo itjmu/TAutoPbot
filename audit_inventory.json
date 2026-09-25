@@ -1,0 +1,129 @@
+{
+  "database": "C:\\Users\\User\\Desktop\\Telegram bots\\TAutoPbot\\bot.db",
+  "integrity": "ok",
+  "foreign_key_violations": 0,
+  "table_counts": {
+    "users": 2,
+    "premium": 2,
+    "channels": 10,
+    "conditions": 3,
+    "condition_items": 3,
+    "join_requests": 2,
+    "request_answers": 0,
+    "posts": 43,
+    "post_targets": 22,
+    "scheduled_posts": 0,
+    "published_messages": 6,
+    "post_sources": 0,
+    "source_targets": 0,
+    "post_reactions": 7,
+    "payments": 6,
+    "usage_daily": 11,
+    "notifications": 1,
+    "logs": 4,
+    "referrals": 0,
+    "blocked_users": 0,
+    "app_settings": 22,
+    "premium_history": 1,
+    "promos": 0,
+    "promo_uses": 0,
+    "templates": 1,
+    "source_seen": 0,
+    "fsm_state": 2,
+    "notification_keys": 0,
+    "runtime_lock": 1,
+    "album_intake": 0,
+    "incoming": 14,
+    "downloads": 8,
+    "download_deliveries": 25,
+    "manual_payments": 0,
+    "user_preferences": 1,
+    "multipost_batches": 1,
+    "multipost_items": 2,
+    "multipost_albums": 0,
+    "contests": 4,
+    "contest_entries": 6,
+    "contest_winners": 3,
+    "contest_outbox": 8,
+    "contest_invites": 0,
+    "contest_channel_referrals": 0,
+    "contest_publications": 3
+  },
+  "known_chat_ids": [
+    -1002364710488,
+    -1002327810816,
+    -1002316242801,
+    -1002064527286,
+    -1001684957875,
+    -1001501960884,
+    -1001496550296,
+    -1001443744494,
+    -1001275427302,
+    -1001213786505,
+    -1001136154916
+  ],
+  "chats": [
+    {
+      "chat_id": -1002364710488,
+      "status": "administrator",
+      "can_post_messages": null
+    },
+    {
+      "chat_id": -1002327810816,
+      "status": "administrator",
+      "can_post_messages": true
+    },
+    {
+      "chat_id": -1002316242801,
+      "status": "administrator",
+      "can_post_messages": true
+    },
+    {
+      "chat_id": -1002064527286,
+      "status": "administrator",
+      "can_post_messages": true
+    },
+    {
+      "chat_id": -1001684957875,
+      "status": "administrator",
+      "can_post_messages": null
+    },
+    {
+      "chat_id": -1001501960884,
+      "status": "administrator",
+      "can_post_messages": true
+    },
+    {
+      "chat_id": -1001496550296,
+      "status": "administrator",
+      "can_post_messages": true
+    },
+    {
+      "chat_id": -1001443744494,
+      "error_type": "TelegramBadRequest"
+    },
+    {
+      "chat_id": -1001275427302,
+      "status": "administrator",
+      "can_post_messages": true
+    },
+    {
+      "chat_id": -1001213786505,
+      "status": "administrator",
+      "can_post_messages": true
+    },
+    {
+      "chat_id": -1001136154916,
+      "status": "administrator",
+      "can_post_messages": true
+    }
+  ],
+  "bot": {
+    "id": 7713745354,
+    "username": "JTasksbot"
+  },
+  "webhook": {
+    "configured": false,
+    "pending_updates": 2
+  }
+}

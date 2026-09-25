@@ -1,0 +1,61 @@
+{
+  "chat_id": -1001136154916,
+  "run": "0c898bf0",
+  "checks": [
+    {
+      "name": "telegram_access",
+      "chat_type": "channel",
+      "bot_status": "administrator"
+    },
+    {
+      "name": "rich_text",
+      "preserved": [
+        "bold",
+        "expandable_blockquote",
+        "italic",
+        "pre",
+        "spoiler",
+        "strikethrough",
+        "text_link",
+        "underline"
+      ],
+      "message_id": 273
+    },
+    {
+      "name": "scheduled_photo",
+      "status": "published",
+      "repeated_tick_duplicates": 0
+    },
+    {
+      "name": "album",
+      "messages": 2
+    },
+    {
+      "name": "contest",
+      "status": "completed",
+      "participants": 0,
+      "results_edited": true
+    },
+    {
+      "name": "scheduled_delete",
+      "message_id": 275
+    }
+  ],
+  "created_messages": [
+    273,
+    274,
+    275,
+    276,
+    277,
+    278
+  ],
+  "deleted_messages": [
+    275,
+    278,
+    277,
+    276,
+    274,
+    273
+  ],
+  "errors": []
+}

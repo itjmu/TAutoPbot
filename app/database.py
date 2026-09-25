@@ -1,5 +1,6 @@
 """database components."""
 
+import asyncio
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -10,25 +11,59 @@ from config import DB_FILE
 from services.migrations import migrate_answers, migrate_sources
 
 db: sqlite3.Connection | None = None
+_worker = None
+_worker_connection = None
 
 
 def connect(path=DB_FILE):
     global db
     if db is not None:
         return db
-    db = sqlite3.connect(path, timeout=30)
+    db = sqlite3.connect(path, timeout=0.1)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA foreign_keys=ON")
     return db
 
 
+async def async_call(callback):
+    """Callback receives its own connection; do not access the global db in it."""
+    global _worker, _worker_connection
+    if db.in_transaction:
+        raise RuntimeError("Cannot await database work inside a transaction")
+    path = db.execute("PRAGMA database_list").fetchone()[2]
+    if not path:  # isolated in-memory tests stay on their owning thread
+        await asyncio.sleep(0)
+        with atomic():
+            return callback(db)
+    if _worker_connection is not db:
+        await close_async()
+        from services.sqlite_worker import SQLiteWorker
+
+        _worker = SQLiteWorker(path)
+        _worker_connection = db
+    return await _worker.call(callback)
+
+
+async def close_async():
+    global _worker, _worker_connection
+    worker, _worker = _worker, None
+    _worker_connection = None
+    if worker is not None:
+        await worker.close()
+
+
 def execute(sql: str, params=()):
     in_transaction = db.in_transaction
-    cur = db.execute(sql, params)
-    if not in_transaction:
-        db.commit()
-    return cur
+    try:
+        cur = db.execute(sql, params)
+        if not in_transaction:
+            db.commit()
+        return cur
+    except BaseException:
+        if not in_transaction:
+            db.rollback()
+        raise
 
 
 def one(sql: str, params=()):
@@ -154,6 +189,7 @@ def init_db():
     init_extensions()
     migrate_sources(db)
     init_planning()
+    init_delivery_queues()
 
 
 def init_planning():
@@ -163,6 +199,7 @@ def init_planning():
     CREATE TABLE IF NOT EXISTS multipost_items(batch_id INTEGER,position INTEGER,post_id INTEGER NOT NULL,PRIMARY KEY(batch_id,position),UNIQUE(batch_id,post_id));
     CREATE TABLE IF NOT EXISTS multipost_albums(batch_id INTEGER,group_id TEXT,post_id INTEGER,PRIMARY KEY(batch_id,group_id));
     CREATE TABLE IF NOT EXISTS contests(id INTEGER PRIMARY KEY,owner_id INTEGER NOT NULL,channel_id INTEGER NOT NULL,title TEXT NOT NULL,post_json TEXT NOT NULL,prize_kind TEXT NOT NULL,prize_json TEXT NOT NULL,starts_at TEXT NOT NULL,ends_at TEXT NOT NULL,subscriptions_json TEXT NOT NULL DEFAULT '[]',captcha INTEGER NOT NULL DEFAULT 0,quiz_question TEXT,quiz_hash TEXT,mode TEXT NOT NULL DEFAULT 'random',referral_min INTEGER NOT NULL DEFAULT 0,referral_bonus INTEGER NOT NULL DEFAULT 1,winner_count INTEGER NOT NULL DEFAULT 1,status TEXT NOT NULL DEFAULT 'scheduled',published_ids TEXT NOT NULL DEFAULT '[]',error TEXT,created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS contest_publications(contest_id INTEGER NOT NULL,channel_id INTEGER NOT NULL,message_id INTEGER,PRIMARY KEY(contest_id,channel_id));
     CREATE TABLE IF NOT EXISTS contest_entries(contest_id INTEGER,user_id INTEGER,inviter_id INTEGER,joined_at TEXT NOT NULL,base_valid INTEGER NOT NULL DEFAULT 0,captcha_passed INTEGER NOT NULL DEFAULT 0,quiz_passed INTEGER NOT NULL DEFAULT 0,captcha_question TEXT,captcha_hash TEXT,attempts INTEGER NOT NULL DEFAULT 0,locked_until TEXT,PRIMARY KEY(contest_id,user_id));
     CREATE TABLE IF NOT EXISTS contest_winners(contest_id INTEGER,user_id INTEGER,rank INTEGER,score INTEGER,prize TEXT,PRIMARY KEY(contest_id,user_id),UNIQUE(contest_id,rank));
     CREATE TABLE IF NOT EXISTS contest_outbox(id INTEGER PRIMARY KEY,contest_id INTEGER NOT NULL,kind TEXT NOT NULL,recipient INTEGER NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',error TEXT,UNIQUE(contest_id,kind,recipient));
@@ -229,6 +266,7 @@ def init_extensions():
             "preview_target INTEGER",
         ],
         "post_targets": [
+            "retry_at TEXT",
             "status TEXT DEFAULT 'pending'",
             "error TEXT",
             "template_id INTEGER",
@@ -244,6 +282,7 @@ def init_extensions():
         ],
         "referrals": ["rewarded_at TEXT"],
         "join_requests": [
+            "next_check_at TEXT",
             "contact_chat_id INTEGER",
             "last_checked TEXT",
             "approval_notified_at TEXT",
@@ -294,6 +333,33 @@ def init_extensions():
         db.execute("INSERT INTO app_settings VALUES('delivery_migration_v2','done')")
     db.commit()
     init_v21()
+
+
+def init_delivery_queues():
+    for table, fields in {
+        "contests": ["retry_at TEXT"],
+        "contest_outbox": ["retry_at TEXT"],
+        "album_intake": ["attempts INTEGER NOT NULL DEFAULT 0", "error TEXT"],
+    }.items():
+        existing = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+        for field in fields:
+            if field.split()[0] not in existing:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {field}")
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS broadcast_jobs(
+      id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL, token TEXT UNIQUE NOT NULL,
+      payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS broadcast_targets(
+      job_id INTEGER NOT NULL, user_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+      retry_at TEXT, error TEXT, PRIMARY KEY(job_id,user_id));
+    CREATE INDEX IF NOT EXISTS idx_broadcast_due ON broadcast_targets(status,retry_at);
+    CREATE TABLE IF NOT EXISTS contest_checks(
+      contest_id INTEGER NOT NULL, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+      present INTEGER NOT NULL, checked_at TEXT NOT NULL,
+      PRIMARY KEY(contest_id,user_id,chat_id));
+    CREATE INDEX IF NOT EXISTS idx_join_due ON join_requests(status,next_check_at);
+    """)
+    db.commit()
 
 
 def setting(key):

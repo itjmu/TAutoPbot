@@ -17,6 +17,7 @@ from app.features import (
     preferences,
     referrals,
     sources,
+    user_admin,
 )
 from app.middleware import Guard
 
@@ -36,6 +37,7 @@ def build_router():
         posts.router,
         sources.router,
         admin.router,
+        user_admin.router,
         referrals.router,
         editors.router,
         downloads.router,

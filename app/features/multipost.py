@@ -162,7 +162,8 @@ async def receive(m, state):
                     (bid, m.media_group_id, pid),
                 )
     if not album:
-        await m.answer(
+        await ui.answer(
+            m,
             tr("Добавлено постов: ") + str(len(items(bid))),
             reply_markup=intake_buttons(bid),
         )
@@ -184,7 +185,7 @@ async def ask_start(message, uid, bid, callback=True):
     if callback:
         await ui.edit(message, text, markup)
     else:
-        await message.answer(text, reply_markup=markup)
+        await ui.answer(message, text, reply_markup=markup)
 
 
 def validate_timetable(batch, uid, start, interval):
@@ -422,7 +423,8 @@ async def start_text(m, state):
     database.execute(
         "UPDATE multipost_batches SET start_at=? WHERE id=?", (timeutils.iso(dt), bid)
     )
-    await m.answer(
+    await ui.answer(
+        m,
         tr("Проверьте расписание\n")
         + "\n".join(
             f"{i + 1}. {preferences.display(m.from_user.id, t)}"

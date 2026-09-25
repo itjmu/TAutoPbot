@@ -35,6 +35,31 @@ def entity_list(value):
     return json.loads(value or "[]") if isinstance(value, str) else list(value or [])
 
 
+def slice_entities(entities, start, length):
+    """Clip formatting to a UTF-16 substring and rebase its offsets."""
+    result = []
+    for entity in entity_list(entities):
+        left = max(start, entity["offset"])
+        right = min(start + length, entity["offset"] + entity["length"])
+        if right > left:
+            result.append(dict(entity, offset=left - start, length=right - left))
+    return result
+
+
+def input_entities(message, raw, value):
+    entities = (
+        getattr(message, "entities", None)
+        or getattr(message, "caption_entities", None)
+        or []
+    )
+    start = utf16len(raw[: len(raw) - len(raw.lstrip())])
+    return slice_entities(
+        [e.model_dump(mode="json", exclude_none=True) for e in entities],
+        start,
+        utf16len(value),
+    )
+
+
 def valid_url(value):
     if (
         not isinstance(value, str)
@@ -161,6 +186,9 @@ class TemplateHTML(HTMLParser):
         "a": "text_link",
         "blockquote": "blockquote",
         "tg-spoiler": "spoiler",
+        "tg-emoji": "custom_emoji",
+        "strike": "strikethrough",
+        "ins": "underline",
     }
 
     def __init__(self):
@@ -181,9 +209,30 @@ class TemplateHTML(HTMLParser):
         attrs = dict(attrs)
         e = {"type": self.TAGS[tag], "offset": utf16len(self.text), "length": 0}
         if tag == "a":
-            if not valid_url(attrs.get("href", "")):
+            href = attrs.get("href", "")
+            mention = re.fullmatch(r"tg://user\?id=(\d+)", href)
+            if mention:
+                e.update(
+                    type="text_mention",
+                    user={"id": int(mention[1]), "is_bot": False, "first_name": "User"},
+                )
+            elif not (
+                valid_url(href) or re.fullmatch(r"tg://[A-Za-z0-9_/?=&.+%#-]+", href)
+            ):
                 raise ValueError(tr("Некорректная HTML-ссылка."))
-            e["url"] = attrs["href"]
+            else:
+                e["url"] = href
+        if tag == "blockquote" and "expandable" in attrs:
+            e["type"] = "expandable_blockquote"
+        if tag == "tg-emoji":
+            if not attrs.get("emoji-id", "").isdigit():
+                raise ValueError(tr("Некорректный ID эмодзи."))
+            e["custom_emoji_id"] = attrs["emoji-id"]
+        if tag == "code" and self.stack and self.stack[-1][0] == "pre":
+            language = attrs.get("class", "")
+            if language.startswith("language-"):
+                self.stack[-1][1]["language"] = language[9:]
+            e["nested_code"] = True
         if tag == "pre" and attrs.get("language"):
             e["language"] = attrs["language"]
         self.stack.append((tag, e))
@@ -193,7 +242,8 @@ class TemplateHTML(HTMLParser):
             raise ValueError(tr("HTML-теги должны быть корректно закрыты."))
         _, e = self.stack.pop()
         e["length"] = utf16len(self.text) - e["offset"]
-        if e["length"]:
+        nested_code = e.pop("nested_code", False)
+        if e["length"] and not nested_code:
             self.entities.append(e)
 
 
@@ -536,4 +586,4 @@ def build_published_markup(buttons, pid, counts=None, preview=False):
                 style=b.get("style"),
             )
         rows.setdefault(b["row"], []).append(button)
-    return ui.kb([rows[k] for k in sorted(rows)]) if rows else None
+    return ui.kb([rows[k] for k in sorted(rows)], published=True) if rows else None

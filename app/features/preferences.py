@@ -67,7 +67,9 @@ async def timezone_choice(c, state):
 async def timezone_text(m, state):
     preferences.save(m.from_user.id, timezone=m.text.strip())
     await state.clear()
-    await m.answer(tr("Часовой пояс сохранён."), reply_markup=ui.back("menu:settings"))
+    await ui.answer(
+        m, tr("Часовой пояс сохранён."), reply_markup=ui.back("menu:settings")
+    )
 
 
 @router.callback_query(F.data == "settings:language")

@@ -110,7 +110,8 @@ async def redeem_promo(uid, code, bot):
 async def promo_value(m: Message, state: FSMContext, bot: Bot):
     days = await redeem_promo(m.from_user.id, m.text, bot)
     await state.clear()
-    await m.answer(
+    await ui.answer(
+        m,
         tr("🎟 Добавлено {v0} дней Premium.", v0=days),
         reply_markup=ui.settings_kb(m.from_user.id),
     )

@@ -2,6 +2,7 @@
 
 import html
 import json
+import secrets
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
@@ -186,7 +187,9 @@ async def check_request(rid, bot, notify=False):
                             "Не удалось получить ссылку: администратору нужно дать боту право приглашать пользователей."
                         )
                     )
-        elif item["item_type"] == "question_text":
+        elif item["item_type"] in {"question_text", "math_captcha"}:
+            if item["item_type"] == "math_captcha":
+                data = request_captcha(rid, item["id"])
             correct = database.one(
                 "SELECT 1 FROM request_answers WHERE request_id=? AND item_id=? AND is_correct=1",
                 (rid, item["id"]),
@@ -233,7 +236,7 @@ async def check_request(rid, bot, notify=False):
     elif notify:
         target = r["contact_chat_id"] or r["telegram_user_id"]
         try:
-            await bot.send_message(
+            sent = await bot.send_message(
                 target,
                 "🔐 "
                 + html.escape(r["title"])
@@ -257,6 +260,7 @@ async def check_request(rid, bot, notify=False):
                     ]
                 ),
             )
+            await ui.track_controls(bot, target, f"join:{rid}", sent)
         except (TelegramBadRequest, TelegramForbiddenError):
             pass
 
@@ -278,6 +282,7 @@ async def notify_join_approved(rid, bot):
     for target in dict.fromkeys([r["telegram_user_id"], r["contact_chat_id"]]):
         if not target:
             continue
+        await ui.retire_controls(bot, target, f"join:{rid}")
         try:
             await bot.send_message(
                 target,
@@ -385,7 +390,7 @@ async def join_answer(m: Message, bot: Bot):
     if not r:
         raise ValueError(tr("Ожидающая заявка не найдена."))
     items = database.all_rows(
-        "SELECT * FROM condition_items WHERE condition_id=? AND item_type='question_text' ORDER BY position",
+        "SELECT * FROM condition_items WHERE condition_id=? AND item_type IN ('question_text','math_captcha') ORDER BY position",
         (r["condition_id"],),
     )
     for item in items:
@@ -394,7 +399,11 @@ async def join_answer(m: Message, bot: Bot):
             (rid, item["id"]),
         ):
             continue
-        expected = json.loads(item["data"])["answer"]
+        expected = (
+            request_captcha(rid, item["id"])
+            if item["item_type"] == "math_captcha"
+            else json.loads(item["data"])
+        )["answer"]
         correct = expected.strip().casefold() == parts[2].strip().casefold()
         database.execute(
             "INSERT INTO request_answers(request_id,item_id,answer,is_correct,created_at) VALUES(?,?,?,?,?)",
@@ -437,10 +446,17 @@ async def condition_value(m, state, bot, raw, uid, d):
         if not 1 <= len(raw) <= 80:
             raise ValueError(tr("Название: 1–80 символов."))
         await state.update_data(name=raw, step="type")
-        await m.answer(
+        await ui.answer(
+            m,
             tr("Что должен сделать человек?"),
             reply_markup=ui.kb(
                 [
+                    [
+                        ui.choice(
+                            tr("🧮 Математическая капча"),
+                            f"cw:{d['token']}:math_captcha",
+                        )
+                    ],
                     [
                         ui.choice(
                             tr("✅ Подписаться"), f"cw:{d['token']}:subscription"
@@ -449,28 +465,35 @@ async def condition_value(m, state, bot, raw, uid, d):
                             tr("💬 Ответить на вопрос"),
                             f"cw:{d['token']}:question_text",
                         ),
-                    ]
+                    ],
                 ]
             ),
         )
         return
     if step == "type":
-        if raw not in {"subscription", "question_text"}:
+        if raw not in {"subscription", "question_text", "math_captcha"}:
             raise ValueError(tr("Выберите вариант кнопкой."))
+        if raw == "math_captcha":
+            d = dict(d, item_type=raw, step="captcha")
+            await condition_value(m, state, bot, raw, uid, d)
+            return
         await state.update_data(
             item_type=raw, step="channel" if raw == "subscription" else "question"
         )
-        await m.answer(
+        await ui.answer(
+            m,
             tr("Отправьте @username канала. Бот должен быть его администратором.")
             if raw == "subscription"
-            else tr("Какой вопрос задать человеку?")
+            else tr("Какой вопрос задать человеку?"),
         )
         return
     if step == "question":
         if not 1 <= len(raw) <= 500:
             raise ValueError(tr("Вопрос: 1–500 символов."))
         await state.update_data(question=raw, step="answer")
-        await m.answer(tr("Теперь отправьте правильный ответ отдельным сообщением."))
+        await ui.answer(
+            m, tr("Теперь отправьте правильный ответ отдельным сообщением.")
+        )
         return
     if step == "channel":
         chat = await bot.get_chat(chat_reference(raw))
@@ -485,6 +508,8 @@ async def condition_value(m, state, bot, raw, uid, d):
             raise ValueError(tr("Добавьте бота администратором указанного канала."))
         value = {"chat_id": chat.id, "title": chat.title or raw}
         value["url"] = await subscription_link(bot, value)
+    elif step == "captcha":
+        value = {}
     elif step == "answer":
         if not 1 <= len(raw) <= 200:
             raise ValueError(tr("Ответ: 1–200 символов."))
@@ -501,7 +526,8 @@ async def condition_value(m, state, bot, raw, uid, d):
             (cid, d["item_type"], json.dumps(value, ensure_ascii=False)),
         )
     await state.clear()
-    await m.answer(
+    await ui.answer(
+        m,
         tr("✅ Условие создано. Выберите его в карточке нужного канала."),
         reply_markup=ui.back(f"cond:open:{cid}"),
     )
@@ -521,6 +547,9 @@ async def cond_open(c: CallbackQuery):
         "SELECT * FROM condition_items WHERE condition_id=? ORDER BY position", (cid,)
     ):
         value = json.loads(item["data"])
+        if item["item_type"] == "math_captcha":
+            lines.append(tr("🧮 Математическая капча"))
+            continue
         lines.append(
             tr("✅ Подписка: ") + str(value.get("title", value.get("chat_id", "")))
             if item["item_type"] == "subscription"
@@ -542,3 +571,16 @@ async def cond_open(c: CallbackQuery):
         ),
     )
     await c.answer()
+
+
+def request_captcha(rid, item_id):
+    key = f"join_captcha:{rid}:{item_id}"
+    saved = database.setting(key)
+    if saved:
+        return json.loads(saved)
+    a, b = secrets.randbelow(20) + 1, secrets.randbelow(20) + 1
+    value = {"question": f"{a} + {b} = ?", "answer": str(a + b)}
+    database.execute(
+        "INSERT INTO app_settings(key,value) VALUES(?,?)", (key, json.dumps(value))
+    )
+    return value

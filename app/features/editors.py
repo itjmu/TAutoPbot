@@ -118,7 +118,8 @@ async def ask_position(m, state):
     d = await state.get_data()
     token = d["token"]
     await state.update_data(step="position")
-    await m.answer(
+    await ui.answer(
+        m,
         tr("Где разместить кнопку?"),
         reply_markup=ui.kb(
             [
@@ -140,7 +141,8 @@ async def ask_color(m, state, uid):
         "success": tr("🟢 Зелёный"),
         "danger": tr("🔴 Красный"),
     }
-    await m.answer(
+    await ui.answer(
+        m,
         tr("Выберите цвет кнопки:"),
         reply_markup=ui.kb(
             [
@@ -461,7 +463,8 @@ async def guided_value(m, state, bot, raw, uid):
             await state.update_data(
                 step="target" if b["type"] == "subscription" else "value"
             )
-            await m.answer(
+            await ui.answer(
+                m,
                 tr("На какой канал нужна подписка? Отправьте @username.")
                 if b["type"] == "subscription"
                 else (
@@ -470,7 +473,7 @@ async def guided_value(m, state, bot, raw, uid):
                     )
                     if b["type"] == "url"
                     else tr("Что показать при нажатии? До 200 символов.")
-                )
+                ),
             )
             return
         if step == "target":
@@ -491,7 +494,9 @@ async def guided_value(m, state, bot, raw, uid):
                 chat_label="@" + chat.username if chat.username else chat.title,
             )
             await state.update_data(button=b, step="value")
-            await m.answer(tr("Какой текст открыть после подписки? До 200 символов."))
+            await ui.answer(
+                m, tr("Какой текст открыть после подписки? До 200 символов.")
+            )
             return
         if step == "value":
             if b["type"] == "url":
@@ -517,7 +522,8 @@ async def guided_value(m, state, bot, raw, uid):
             (d["cid"], uid, raw),
         ).lastrowid
         await state.clear()
-        await m.answer(
+        await ui.answer(
+            m,
             tr("✅ Шаблон создан. Теперь добавьте текст или кнопки."),
             reply_markup=ui.back(f"tpl:{tid}:open"),
         )
@@ -540,14 +546,14 @@ async def guided_value(m, state, bot, raw, uid):
             f"UPDATE templates SET {field}=? WHERE id=?", (value, d["tid"])
         )
         await state.clear()
-        await m.answer(
-            tr("✅ Сохранено."), reply_markup=ui.back(f"tpl:{d['tid']}:open")
+        await ui.answer(
+            m, tr("✅ Сохранено."), reply_markup=ui.back(f"tpl:{d['tid']}:open")
         )
         return
     if kind == "admin_user":
         text, markup = features_admin.admin_user_card(int(raw))
         await state.clear()
-        await m.answer(text, reply_markup=markup)
+        await ui.answer(m, text, reply_markup=markup)
         return
     if kind == "admin_change":
         value = end_of_day(raw, uid) if d["mode"] == "set" else int(raw)
@@ -559,7 +565,7 @@ async def guided_value(m, state, bot, raw, uid):
             )
         text, markup = features_admin.admin_user_card(d["uid"])
         await state.clear()
-        await m.answer(text, reply_markup=markup)
+        await ui.answer(m, text, reply_markup=markup)
         return
     if kind in {"refdays", "defaultdays"}:
         n = int(raw)
@@ -568,7 +574,8 @@ async def guided_value(m, state, bot, raw, uid):
         key = d["key"] if kind == "refdays" else "promo_default_days"
         database.execute("UPDATE app_settings SET value=? WHERE key=?", (str(n), key))
         await state.clear()
-        await m.answer(
+        await ui.answer(
+            m,
             tr("✅ Сохранено."),
             reply_markup=ui.back("aw:ref" if kind == "refdays" else "aw:promos"),
         )
@@ -602,10 +609,11 @@ async def guided_value(m, state, bot, raw, uid):
                 raise ValueError(tr("Выберите условие кнопкой."))
             if raw == "subscription":
                 await state.update_data(step="channels")
-                await m.answer(
+                await ui.answer(
+                    m,
                     tr(
                         "Отправьте @username обязательных каналов — каждый с новой строки."
-                    )
+                    ),
                 )
                 return
             database.execute(
@@ -613,7 +621,7 @@ async def guided_value(m, state, bot, raw, uid):
             )
         await state.clear()
         text, markup = features_admin.ref_panel()
-        await m.answer(text, reply_markup=markup)
+        await ui.answer(m, text, reply_markup=markup)
         return
     if kind == "promo":
         p = d["promo"]
@@ -646,7 +654,7 @@ async def guided_value(m, state, bot, raw, uid):
         elif step == "audience":
             if raw == "personal":
                 await state.update_data(step="personal")
-                await m.answer(tr("Отправьте Telegram ID получателя."))
+                await ui.answer(m, tr("Отправьте Telegram ID получателя."))
                 return
             if raw != "all":
                 raise ValueError(tr("Выберите вариант кнопкой."))

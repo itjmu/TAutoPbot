@@ -36,11 +36,26 @@ def post_target_rows(pid):
     )
 
 
-async def show_post(bot, uid, pid, with_preview=True):
+async def show_post(bot, uid, pid, with_preview=True, *, panel=True):
     activate(uid)
     p = content.post_owned(pid, uid)
     targets = post_target_rows(pid)
     ids = []
+    preview_ready = False
+    controls = ui.post_controls(
+        pid,
+        p["status"],
+        has_video=(
+            p["content_type"] == "video"
+            or (
+                p["content_type"] == "album"
+                and any(
+                    item["content_type"] == "video"
+                    for item in content.entity_list(p["media_json"])
+                )
+            )
+        ),
+    )
     if with_preview and p["status"] in {"draft", "scheduled"}:
         target = next(
             (r for r in targets if r["id"] == p["preview_target"]),
@@ -55,9 +70,23 @@ async def show_post(bot, uid, pid, with_preview=True):
                 bot,
                 uid,
                 payload,
-                content.build_published_markup(payload["buttons"], pid, preview=True),
+                None,
             )
             ids.extend(x.message_id for x in (m if isinstance(m, list) else [m]))
+            for mid in ids:
+                ui.note_message(uid, mid)
+            preview_buttons = content.build_published_markup(
+                payload["buttons"], pid, preview=True
+            )
+            await bot.edit_message_reply_markup(
+                chat_id=uid,
+                message_id=ids[-1],
+                reply_markup=ui.kb(
+                    (preview_buttons.inline_keyboard if preview_buttons else [])
+                    + controls.inline_keyboard
+                ),
+            )
+            preview_ready = True
         except (TelegramBadRequest, ValueError) as exc:
             await bot.send_message(
                 uid,
@@ -103,15 +132,24 @@ async def show_post(bot, uid, pid, with_preview=True):
             html.escape(f"{r['title']}: {r['target_status']} {r['error'] or ''}")[:220]
             for r in targets
         )
-    control = await bot.send_message(
-        uid, text[:3900], reply_markup=ui.post_controls(pid, p["status"])
-    )
-    ids.append(control.message_id)
+    if preview_ready:
+        await ui.clear_controls(bot, uid, ui.panel_id(uid))
+        await ui.track_controls(bot, uid, f"post:{pid}", m)
+    elif panel:
+        await ui.show_panel(bot, uid, text[:3900], ui.post_controls(pid, p["status"]))
+        await ui.retire_controls(bot, uid, f"post:{pid}")
+    else:
+        control = await bot.send_message(
+            uid, text[:3900], reply_markup=ui.post_controls(pid, p["status"])
+        )
+        ids.append(control.message_id)
     database.execute(
         "UPDATE posts SET preview_ids=? WHERE id=?", (json.dumps(ids), pid)
     )
     # Remove previous preview only after the replacement was delivered.
     for old in content.entity_list(p["preview_ids"]):
+        if old == ui.panel_id(uid) or old in ids:
+            continue
         try:
             await bot.delete_message(uid, old)
         except TelegramBadRequest:
@@ -150,7 +188,9 @@ async def post_action(c: CallbackQuery, state: FSMContext, bot: Bot):
     await state.set_state(PostCreate.idle)
     if action == "preview":
         if not post_target_rows(pid):
-            raise ValueError(tr("Выберите хотя бы один канал."))
+            await ui.target_picker(c, pid)
+            await c.answer()
+            return
         await c.answer()
         await show_post(bot, uid, pid)
         return
@@ -742,7 +782,8 @@ async def edit_post_value(m: Message, state: FSMContext, bot: Bot):
         dt = preferences.parse_local(m.from_user.id, m.text)
         if dt <= timeutils.now():
             raise ValueError(tr("Это время уже прошло."))
-        await m.answer(
+        await ui.answer(
+            m,
             tr("Подтвердите публикацию: ") + preferences.display(m.from_user.id, dt),
             reply_markup=ui.kb(
                 [
@@ -807,7 +848,7 @@ def schedule_post(pid, uid, dt):
         database.db.execute("UPDATE posts SET status='scheduled' WHERE id=?", (pid,))
 
 
-async def execute_publish(pid, bot):
+async def execute_publish(pid, bot, automatic=False):
     with database.atomic():
         claimed = database.db.execute(
             "UPDATE posts SET status='publishing' WHERE id=? AND status IN ('draft','scheduled','failed','partial')",
@@ -827,6 +868,13 @@ async def execute_publish(pid, bot):
             (pid, ch["id"]),
         )
         if delivery["status"] in {"sent", "uncertain", "sending"}:
+            continue
+        if automatic and delivery["status"] == "failed":
+            continue
+        if (
+            delivery["retry_at"]
+            and timeutils.parse_dt(delivery["retry_at"]) > timeutils.now()
+        ):
             continue
         attempted = False
         try:
@@ -879,6 +927,19 @@ async def execute_publish(pid, bot):
                     (pid, ch["id"]),
                 )
         except Exception as exc:
+            if isinstance(exc, TelegramRetryAfter):
+                database.execute(
+                    "UPDATE post_targets SET status='retry',retry_at=?,error=? WHERE post_id=? AND channel_id=?",
+                    (
+                        timeutils.iso(
+                            timeutils.now() + timedelta(seconds=exc.retry_after + 1)
+                        ),
+                        str(exc)[:250],
+                        pid,
+                        ch["id"],
+                    ),
+                )
+                continue
             if isinstance(exc, content.PartialAlbumError):
                 with database.atomic():
                     for sent in exc.messages:
@@ -932,6 +993,20 @@ async def execute_publish(pid, bot):
         )
     )
     database.execute("UPDATE posts SET status=? WHERE id=?", (result, pid))
+    retry = database.one(
+        "SELECT MIN(retry_at) AS due FROM post_targets WHERE post_id=? AND status='retry'",
+        (pid,),
+    )["due"]
+    if retry and result != "uncertain":
+        with database.atomic():
+            database.db.execute(
+                "UPDATE posts SET status='scheduled' WHERE id=?", (pid,)
+            )
+            database.db.execute(
+                "INSERT INTO scheduled_posts(post_id,publish_at,created_at) VALUES(?,?,?)",
+                (pid, retry, timeutils.iso()),
+            )
+        result = "scheduled"
     await accounts.check_referral(p["owner_telegram_id"], bot)
     return result
 
@@ -1008,11 +1083,20 @@ async def published_action(c: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data == "menu:posts")
 async def menu_posts(c: CallbackQuery):
+    draft = database.one(
+        "SELECT id FROM posts WHERE owner_telegram_id=? AND status='draft' ORDER BY id DESC LIMIT 1",
+        (c.from_user.id,),
+    )
     await ui.edit(
         c,
         tr("📢 Автопостинг\nСоздайте пост или посмотрите отложенные публикации."),
         ui.kb(
             [
+                *(
+                    [[ui.choice(tr("Продолжить черновик"), f"p:{draft['id']}:preview")]]
+                    if draft
+                    else []
+                ),
                 [
                     ui.choice(tr("➕ Создать пост"), "post:create"),
                     ui.choice(tr("🕐 Отложенные"), "post:scheduled"),
@@ -1037,7 +1121,7 @@ async def receive_post(m: Message, state: FSMContext, bot: Bot):
     pid = content.create_draft(m.from_user.id, payload, [target] if target else [])
     await state.update_data(pid=pid)
     await state.set_state(PostCreate.idle)
-    await ui.send_target_picker(bot, m.from_user.id, pid)
+    await ui.send_target_picker(bot, m.from_user.id, pid, panel=True)
 
 
 @router.callback_query(F.data == "post:scheduled")

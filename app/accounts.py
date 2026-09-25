@@ -1,5 +1,6 @@
 """accounts components."""
 
+import json
 from datetime import timedelta
 
 from app import access as access
@@ -11,27 +12,48 @@ from app.i18n import Labels, tr
 
 def ensure_user(user):
     with database.atomic():
-        fresh = not database.one("SELECT 1 FROM users WHERE telegram_id=?", (user.id,))
-        database.db.execute(
-            "INSERT INTO users(telegram_id,username,first_name,last_name,created_at,last_active_at) VALUES(?,?,?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET username=excluded.username,first_name=excluded.first_name,last_name=excluded.last_name,last_active_at=excluded.last_active_at",
-            (
-                user.id,
-                user.username,
-                user.first_name,
-                user.last_name,
-                timeutils.iso(),
-                timeutils.iso(),
-            ),
+        _ensure_user(database.db, user)
+
+
+async def ensure_user_async(user):
+    await database.async_call(lambda conn: _ensure_user(conn, user))
+
+
+def _ensure_user(conn, user):
+    recent = conn.execute(
+        "SELECT username,first_name,last_name,last_active_at FROM users WHERE telegram_id=?",
+        (user.id,),
+    ).fetchone()
+    if (
+        recent
+        and tuple(recent[:3]) == (user.username, user.first_name, user.last_name)
+        and timeutils.parse_dt(recent["last_active_at"])
+        > timeutils.now() - timedelta(seconds=30)
+    ):
+        return
+    fresh = not conn.execute(
+        "SELECT 1 FROM users WHERE telegram_id=?", (user.id,)
+    ).fetchone()
+    conn.execute(
+        "INSERT INTO users(telegram_id,username,first_name,last_name,created_at,last_active_at) VALUES(?,?,?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET username=excluded.username,first_name=excluded.first_name,last_name=excluded.last_name,last_active_at=excluded.last_active_at",
+        (
+            user.id,
+            user.username,
+            user.first_name,
+            user.last_name,
+            timeutils.iso(),
+            timeutils.iso(),
+        ),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO premium(user_id,created_at,updated_at) VALUES(?,?,?)",
+        (user.id, timeutils.iso(), timeutils.iso()),
+    )
+    if fresh:
+        conn.execute(
+            "INSERT INTO logs(telegram_id,event,created_at) VALUES(?,?,?)",
+            (user.id, "USER_REGISTERED", timeutils.iso()),
         )
-        database.db.execute(
-            "INSERT OR IGNORE INTO premium(user_id,created_at,updated_at) VALUES(?,?,?)",
-            (user.id, timeutils.iso(), timeutils.iso()),
-        )
-        if fresh:
-            database.db.execute(
-                "INSERT INTO logs(telegram_id,event,created_at) VALUES(?,?,?)",
-                (user.id, "USER_REGISTERED", timeutils.iso()),
-            )
 
 
 def blocked(uid: int) -> bool:
@@ -68,8 +90,19 @@ def start_trial(uid: int) -> bool:
     return False
 
 
+def personal_limits(uid):
+    return json.loads(database.setting(f"user_limits:{uid}") or "{}")
+
+
+def user_limit(uid, action):
+    overrides = personal_limits(uid)
+    return overrides.get(
+        action, plans.value(("premium" if has_premium(uid) else "free") + "_" + action)
+    )
+
+
 def channel_limit(uid: int):
-    return plans.value(("premium" if has_premium(uid) else "free") + "_channels")
+    return user_limit(uid, "channels")
 
 
 def channel_count(uid: int):
@@ -82,7 +115,7 @@ def channel_count(uid: int):
 def use_daily(uid: int, action: str, amount=1) -> bool:
     if amount < 0:
         raise ValueError("Negative usage")
-    limit = plans.value(("premium" if has_premium(uid) else "free") + "_" + action)
+    limit = user_limit(uid, action)
     day = timeutils.now().date().isoformat()
     with database.atomic():
         r = database.one(
@@ -106,7 +139,7 @@ def refund_daily(uid, action, day, amount=1):
 
 
 def button_styles(uid):
-    count = plans.value(("premium" if has_premium(uid) else "free") + "_button_colors")
+    count = user_limit(uid, "button_colors")
     return [None] + ["primary", "success", "danger"][:count]
 
 
@@ -122,7 +155,7 @@ def channel_allowed(uid, cid):
 
 
 def source_limit(uid):
-    return plans.value(("premium" if has_premium(uid) else "free") + "_sources")
+    return user_limit(uid, "sources")
 
 
 def source_allowed(row):

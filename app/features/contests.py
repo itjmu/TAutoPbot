@@ -12,6 +12,7 @@ from aiogram.types import InlineKeyboardButton
 
 from app import access, accounts, content, preferences, timeutils, ui
 from app import database as db
+from app.features import contest_form
 from app.i18n import STATUS, tr
 from services import contests as service
 from services.telegram_links import chat_reference, subscription_link
@@ -74,6 +75,10 @@ PROMPTS = {
 }
 
 
+PROMPTS.update(contest_form.PROMPTS)
+STEPS.extend(contest_form.PROMPTS)
+
+
 async def prompt(message, state, step):
     await state.set_state(Create.input)
     await state.update_data(step=step)
@@ -101,6 +106,7 @@ async def prompt(message, state, step):
         ],
         "mode": [
             (tr("Случайно"), "random"),
+            (tr("С задачей"), "task"),
             (tr("Больше шансов за друзей"), "weighted"),
             (tr("Больше приглашений"), "ranking"),
         ],
@@ -123,6 +129,8 @@ async def prompt(message, state, step):
     rows.append([ui.choice(tr("Отменить"), "menu:contests")])
     text = tr(PROMPTS[step])
     data = await state.get_data()
+    if data.get("form"):
+        rows[-1] = [ui.choice("⬅️ " + tr("Назад"), "contest:panel")]
     if data.get("launch_v4") and step == "post_style":
         label = (
             tr("✨ Шаблон 1 — Конкурс")
@@ -130,7 +138,7 @@ async def prompt(message, state, step):
             else tr("✨ Шаблон 2 — Розыгрыш")
         )
         rows[0] = [ui.choice(label, "contest:setup:post_style:template")]
-    if data.get("quick") and not data.get("launch_v4"):
+    if data.get("quick") and not data.get("launch_v4") and not data.get("form"):
         if step == "post":
             text = tr(
                 "1/2 · Отправьте пост розыгрыша\nНапишите, что разыгрываете. Можно приложить фото или видео. Кнопку «Участвовать» добавим сами."
@@ -150,16 +158,22 @@ async def prompt(message, state, step):
             )
         if data.get("post") and data.get("end"):
             rows[-1] = [ui.choice(tr("⬅️ К настройкам розыгрыша"), "contest:panel")]
+    if step in {"post", "prize_title", "prize_description", "quiz"}:
+        text += "\n\n" + tr(
+            "Выделите текст в Telegram и выберите формат: жирный, курсив, ссылка, цитата, спойлер и другие."
+        )
     if step in {"start", "end"}:
         text += "\n" + preferences.display(message.chat.id, timeutils.now())
-    await message.answer(text, reply_markup=ui.kb(rows))
+    await ui.answer(message, text, reply_markup=ui.kb(rows))
 
 
 def draft_row(data, uid):
     return {
         "id": 0,
         "owner_id": uid,
-        "post_json": json.dumps(data["post"]),
+        "post_json": json.dumps(
+            dict(data["post"], field_entities=data.get("field_entities", {}))
+        ),
         "prize_title": data.get("prize_title", ""),
         "title": data["title"],
         "winner_count": data["winners"],
@@ -171,6 +185,8 @@ def draft_row(data, uid):
 
 
 def generated_post(data):
+    if data.get("form"):
+        return contest_form.generated(data)
     title = (
         tr("🏆 КОНКУРС ДРУЗЕЙ")
         if data["giveaway_type"] == "contest"
@@ -206,6 +222,8 @@ def save_draft(uid, data):
 
 async def draft_panel(message, state, callback=False):
     data = await state.get_data()
+    if data.get("form"):
+        return await contest_form.panel(message, state, callback)
     if not data.get("quick") or not data.get("post") or not data.get("end"):
         raise ValueError(tr("Сначала заполните настройки конкурса."))
     data.pop("pending_prize_kind", None)
@@ -303,10 +321,11 @@ async def draft_panel(message, state, callback=False):
                 ui.choice(tr("🔗 Вид ссылок"), "contest:edit:subscription_layout"),
             ],
         )
+    rows.insert(1, [ui.choice(tr("🧮 Математическая капча"), "contest:edit:captcha")])
     if callback:
         await ui.edit(message, text, ui.kb(rows))
     else:
-        await message.answer(text, reply_markup=ui.kb(rows))
+        await ui.answer(message, text, reply_markup=ui.kb(rows))
 
 
 @router.callback_query(F.data == "contest:panel")
@@ -321,12 +340,17 @@ async def resume(c, state):
     if not raw:
         raise ValueError(tr("Сначала заполните настройки конкурса."))
     await state.set_data(json.loads(raw))
+    if (await state.get_data()).get("selecting_channels"):
+        await contest_form.channels(c, state)
+        await c.answer()
+        return
     await draft_panel(c, state, True)
     await c.answer()
 
 
 @router.callback_query(F.data == "contest:discard")
 async def discard(c, state):
+    await state.clear()
     db.execute(
         "DELETE FROM app_settings WHERE key=?", (f"contest_draft:{c.from_user.id}",)
     )
@@ -354,18 +378,24 @@ async def preview(c, state, bot):
     data = await state.get_data()
     if not data.get("quick") or not data.get("post"):
         raise ValueError(tr("Сначала заполните настройки конкурса."))
-    await content.send_content(
+    sent = await content.send_content(
         bot,
         c.from_user.id,
         service.publication(draft_row(data, c.from_user.id))
-        if data.get("launch_v4")
+        if data.get("launch_v4") or data.get("form")
         else data["post"],
         service.public_markup(draft_row(data, c.from_user.id), 0)
-        if data.get("launch_v4")
+        if data.get("launch_v4") or data.get("form")
         else ui.kb([[ui.choice(tr("🎉 Участвовать"), "demo")]]),
     )
+    await ui.track_controls(bot, c.from_user.id, "contest_preview", sent)
     await draft_panel(c.message, state)
     await c.answer()
+
+
+@router.callback_query(F.data.startswith("contest:section:"))
+async def form_section(c, state):
+    await contest_form.section(c, state)
 
 
 @router.callback_query(F.data == "contest:extra")
@@ -472,6 +502,9 @@ async def subscription_choice(c, state, bot):
 
 @router.callback_query(F.data == "menu:contests")
 async def menu(c, state):
+    data = await state.get_data()
+    if data.get("form") or data.get("selecting_channels"):
+        save_draft(c.from_user.id, data)
     await state.clear()
     markup = ui.kb(
         [[ui.choice(tr("Продолжить черновик"), "contest:resume")]]
@@ -484,9 +517,11 @@ async def menu(c, state):
         ui.kb(
             list(markup.inline_keyboard)
             + [
-                [ui.choice(tr("➕ Создать конкурс"), "contest:new")],
+                [
+                    ui.choice(tr("➕ Создать КР"), "contest:new"),
+                    ui.choice(tr("Мои КР"), "contest:mine:0"),
+                ],
                 [ui.choice(tr("🎉 Активные конкурсы"), "contest:list:0")],
-                [ui.choice(tr("Мои конкурсы"), "contest:mine:0")],
                 [ui.choice(tr("Главное меню"), "menu:main")],
             ]
         ),
@@ -502,7 +537,7 @@ async def directory(c):
     page = max(0, int(c.data.split(":")[2]))
     offset = page * 10
     query = (
-        "SELECT * FROM contests WHERE owner_id=?"
+        "SELECT * FROM contests WHERE owner_id=? AND status IN ('active','scheduled','publishing','uncertain') AND julianday(ends_at)>julianday('now')"
         if mine
         else "SELECT * FROM contests WHERE status='active' AND julianday(ends_at)>julianday(?)"
     )
@@ -541,6 +576,20 @@ async def directory(c):
 
 @router.callback_query(F.data == "contest:new")
 async def new(c, state):
+    await contest_form.start(c, state)
+
+
+@router.callback_query(F.data.startswith("contest:select:"))
+async def select_channel(c, state):
+    await contest_form.toggle(c, state)
+
+
+@router.callback_query(F.data == "contest:selected")
+async def selected_channels(c, state):
+    await contest_form.selected(c, state)
+
+
+async def legacy_new(c, state):
     await state.clear()
     await ui.edit(
         c,
@@ -629,6 +678,22 @@ async def target(c, state, bot=None):
 
 async def accept(message, state, bot, value, payload=None):
     data = await state.get_data()
+    field = data.get("step")
+    if field in {"prize_title", "title", "quiz"}:
+        raw = value
+        value = value.strip()
+        entities = content.input_entities(message, raw, value)
+        if field == "quiz":
+            entities = content.slice_entities(
+                entities, 0, content.utf16len(value.split("\n")[0])
+            )
+        fields = dict(data.get("field_entities", {}))
+        fields[field] = entities
+        data["field_entities"] = fields
+    if data.get("form") and await contest_form.accept(
+        message, state, bot, value, payload
+    ):
+        return
     step = data.get("step")
     uid = message.chat.id
     if data.get("quick") and step == "review":
@@ -646,6 +711,7 @@ async def accept(message, state, bot, value, payload=None):
         if value not in {"template", "custom"}:
             raise ValueError(tr("Выберите вариант кнопкой."))
         if value == "template":
+            data["custom_post"] = False
             data["post"] = generated_post(data)
         else:
             await state.set_data(data)
@@ -682,9 +748,15 @@ async def accept(message, state, bot, value, payload=None):
             raise ValueError(tr("Название должно содержать от 1 до 100 символов."))
         data["title"] = value
     elif step == "post":
-        if not payload or payload["content_type"] not in {"text", "photo", "video"}:
+        if not payload or payload["content_type"] not in {
+            "text",
+            "photo",
+            "video",
+            "animation",
+        }:
             raise ValueError(tr("Отправьте один текст, фото или видео без альбома."))
         data["post"] = payload
+        data["custom_post"] = True
         if data.get("quick") and not data.get("title"):
             data["title"] = " ".join((payload.get("text") or "").split())[:80] or tr(
                 "Розыгрыш"
@@ -712,7 +784,9 @@ async def accept(message, state, bot, value, payload=None):
                     tr("Промокоды должны быть уникальными, до 1000 символов каждый.")
                 )
             data[step] = {"codes": codes}
-            if data.get("quick") and len(codes) < data["winners"]:
+            if data.get("quick") and len(codes) < data["winners"] * data.get(
+                "prize_count", 1
+            ):
                 raise ValueError(
                     tr("Промокодов меньше, чем победителей. Укажите меньшее число.")
                 )
@@ -736,7 +810,9 @@ async def accept(message, state, bot, value, payload=None):
     elif step == "winners":
         if not value.isdigit() or not 1 <= int(value) <= 20:
             raise ValueError(tr("Укажите число от 1 до 20."))
-        if data["prize_kind"] == "promo" and len(data["prize"]["codes"]) < int(value):
+        if data["prize_kind"] == "promo" and len(data["prize"]["codes"]) < int(
+            value
+        ) * data.get("prize_count", 1):
             raise ValueError(
                 tr("Промокодов меньше, чем победителей. Укажите меньшее число.")
             )
@@ -751,6 +827,9 @@ async def accept(message, state, bot, value, payload=None):
         if value not in {"random", "weighted", "ranking"}:
             raise ValueError(tr("Выберите способ определения победителей кнопкой."))
         data[step] = value
+        if data.get("form"):
+            data["giveaway_type"] = "contest" if value == "ranking" else "raffle"
+            data["quiz"] = None
     elif step == "subscriptions":
         chats = []
         if value != "-":
@@ -835,6 +914,8 @@ async def accept(message, state, bot, value, payload=None):
         data[step] = timeutils.iso(dt)
         data["end_duration"] = {"hour": 3600, "day": 86400, "week": 604800}.get(value)
     await state.set_data(data)
+    if data.get("form") and step == "quiz":
+        await state.update_data(giveaway_type="contest" if data["quiz"] else "raffle")
     if data.get("launch_v4") and not data.get("creation_complete"):
         next_step = {
             "prize_title": "post_style",
@@ -856,8 +937,10 @@ async def accept(message, state, bot, value, payload=None):
     next_step = STEPS[STEPS.index(step) + 1]
     if next_step == "review":
         await state.update_data(step="review")
-        await content.send_content(bot, uid, data["post"])
-        await message.answer(
+        sent = await content.send_content(bot, uid, data["post"])
+        ui.note_sent(uid, sent)
+        await ui.answer(
+            message,
             tr("Проверьте конкурс\n")
             + html.escape(data["title"])
             + tr("\nНачало: ")
@@ -895,7 +978,7 @@ async def input_message(m, state, bot):
         state,
         bot,
         m.text or m.caption or "",
-        content.message_payload(m) if data.get("step") == "post" else None,
+        content.message_payload(m) if data.get("step") in {"post", "media"} else None,
     )
 
 
@@ -911,11 +994,29 @@ async def setup(c, state, bot):
 @router.callback_query(F.data == "contest:create")
 async def create(c, state):
     d = await state.get_data()
+    if d.get("post"):
+        d["post"]["field_entities"] = d.get("field_entities", {})
     uid = c.from_user.id
     if d.get("step") != "review":
         raise ValueError(tr("Сначала заполните настройки конкурса."))
     if not accounts.channel_allowed(uid, d["channel_id"]):
         raise ValueError(tr("Канал недоступен."))
+    if not all(
+        accounts.channel_allowed(uid, cid)
+        for cid in d.get("channel_ids", [d["channel_id"]])
+    ):
+        raise ValueError(tr("Канал недоступен."))
+    if d.get("form"):
+        if not d.get("prize_title"):
+            raise ValueError(tr(PROMPTS["prize_title"]))
+        if (
+            d["giveaway_type"] == "contest"
+            and d["mode"] == "random"
+            and not d.get("quiz")
+        ):
+            raise ValueError(tr(PROMPTS["quiz"]))
+        service.publication(draft_row(d, uid))
+        d["prize"]["quantity"] = d.get("prize_count", 1)
     if d.get("start_now"):
         d["start"] = timeutils.iso(timeutils.now() + timedelta(seconds=5))
         if d.get("end_duration"):
@@ -926,7 +1027,9 @@ async def create(c, state):
     end_dt = timeutils.parse_dt(d["end"])
     if not start_dt + timedelta(minutes=1) <= end_dt <= start_dt + timedelta(days=365):
         raise ValueError(tr("Конкурс должен длиться от минуты до года."))
-    if d["prize_kind"] == "promo" and len(d["prize"].get("codes", [])) < d["winners"]:
+    if d["prize_kind"] == "promo" and len(d["prize"].get("codes", [])) < d[
+        "winners"
+    ] * d.get("prize_count", 1):
         raise ValueError(
             tr("Промокодов меньше, чем победителей. Укажите меньшее число.")
         )
@@ -990,8 +1093,15 @@ async def create(c, state):
             db.db.execute(
                 "INSERT INTO app_settings VALUES(?,?)", (creation_key, str(cid))
             )
+            for target_id in d.get("channel_ids", [d["channel_id"]]):
+                db.db.execute(
+                    "INSERT INTO contest_publications(contest_id,channel_id) VALUES(?,?)",
+                    (cid, target_id),
+                )
     db.execute("DELETE FROM app_settings WHERE key=?", (f"contest_draft:{uid}",))
     await state.clear()
+    if getattr(c, "bot", None) is not None:
+        await ui.retire_controls(c.bot, uid, "contest_preview")
     await ui.edit(
         c,
         tr(
@@ -1006,19 +1116,22 @@ async def create(c, state):
 async def show_entry(message, state, bot, cid, uid, inviter=None):
     row = service.get(cid)
     if not service.is_open(row):
-        await message.answer(
+        await ui.answer(
+            message,
             tr("Конкурс сейчас не принимает участников.\nНачало: ")
             + preferences.display(uid, row["starts_at"])
             + tr("\nКонец: ")
-            + preferences.display(uid, row["ends_at"])
+            + preferences.display(uid, row["ends_at"]),
         )
         return
     await state.set_data({"contest_id": cid, "inviter": inviter})
     # Attribute a referral immediately; further navigation must not lose it.
     service.register(cid, uid, inviter)
-    await content.send_content(bot, uid, json.loads(row["post_json"]))
+    sent = await content.send_content(bot, uid, json.loads(row["post_json"]))
+    ui.note_sent(uid, sent)
     me = await bot.get_me()
-    await message.answer(
+    await ui.answer(
+        message,
         "🏆 "
         + html.escape(row["title"])
         + tr("\nКонец: ")
@@ -1058,7 +1171,8 @@ async def check_entry(message, state, bot, cid, uid):
     try:
         missing = await service.missing_subscriptions(bot, row, uid)
     except TelegramAPIError:
-        await message.answer(
+        await ui.answer(
+            message,
             tr("Не удалось проверить подписки. Попробуйте ещё раз чуть позже."),
             reply_markup=ui.kb(
                 [[ui.choice(tr("Проверить снова"), f"contest:join:{cid}")]]
@@ -1075,7 +1189,8 @@ async def check_entry(message, state, bot, cid, uid):
             for ch in missing
         ]
         rows.append([ui.choice(tr("Проверить снова"), f"contest:join:{cid}")])
-        await message.answer(
+        await ui.answer(
+            message,
             tr("Подпишитесь на эти каналы и группы, затем нажмите «Проверить снова»."),
             reply_markup=ui.kb(rows),
         )
@@ -1100,7 +1215,9 @@ async def check_entry(message, state, bot, cid, uid):
                 question = row["quiz_question"]
             await state.set_state(Entry.answer)
             await state.update_data(contest_id=cid, kind=kind)
-            await message.answer(tr("Ответьте на вопрос:\n") + html.escape(question))
+            await ui.answer(
+                message, tr("Ответьте на вопрос:\n") + html.escape(question)
+            )
             return
     if not service.is_open(service.get(cid)):
         raise ValueError(tr("Приём участников завершён."))
@@ -1117,7 +1234,8 @@ async def check_entry(message, state, bot, cid, uid):
         if count >= row["referral_min"]
         else tr("Осталось пригласить друзей: ") + str(row["referral_min"] - count)
     )
-    await message.answer(
+    await ui.answer(
+        message,
         text
         + tr("\nПриглашено: {count}\nВаша ссылка:\n{link}", count=count, link=link),
         reply_markup=ui.kb(
@@ -1139,13 +1257,10 @@ async def join(c, state, bot):
 async def participate(c, bot):
     cid = int(c.data.split(":")[2])
     row = service.get(cid)
-    target = db.one(
-        "SELECT telegram_chat_id FROM channels WHERE id=?", (row["channel_id"],)
-    )
-    if (
-        not c.message
-        or c.message.chat.id != target[0]
-        or c.message.message_id not in json.loads(row["published_ids"])
+    if not c.message or not any(
+        c.message.chat.id == target["telegram_chat_id"]
+        and c.message.message_id == target["message_id"]
+        for target in service.publication_targets(row)
     ):
         raise ValueError(tr("Используйте кнопку в исходном посте канала."))
     if not service.is_open(row):
@@ -1157,7 +1272,7 @@ async def participate(c, bot):
         await c.answer(tr("Доступ запрещён."), show_alert=True)
         return
     uid = c.from_user.id
-    accounts.ensure_user(c.from_user)
+    await accounts.ensure_user_async(c.from_user)
     entry = service.register(cid, uid)
     try:
         missing = await service.missing_subscriptions(bot, row, uid)
@@ -1310,17 +1425,21 @@ async def manage(c):
             (row["id"],),
         )
         row = service.get(row["id"])
-        if row["status"] == "cancelled" and json.loads(row["published_ids"]):
-            target_chat = db.one(
-                "SELECT telegram_chat_id FROM channels WHERE id=?", (row["channel_id"],)
-            )
+        if row["status"] == "cancelled":
             with db.atomic():
-                service.enqueue(
-                    row["id"],
-                    "results",
-                    target_chat[0],
-                    {"text": tr("⛔ Организатор отменил конкурс / розыгрыш.")},
-                )
+                for target in service.publication_targets(row):
+                    if target["message_id"]:
+                        service.enqueue(
+                            row["id"],
+                            "results",
+                            target["telegram_chat_id"],
+                            {
+                                "text": tr(
+                                    "⛔ Организатор отменил конкурс / розыгрыш."
+                                ),
+                                "message_id": target["message_id"],
+                            },
+                        )
     entries = service.participant_count(row["id"])
     delivery = db.all_rows(
         "SELECT kind,recipient,status FROM contest_outbox WHERE contest_id=?",
@@ -1431,10 +1550,22 @@ async def recover_publication(c, state):
         raise ValueError(tr("Этот шаг устарел. Откройте настройку заново."))
     if decision == "sent":
         await state.set_state(Recover.post)
-        await state.set_data({"recover_contest_id": row["id"]})
+        targets = service.publication_targets(row)
+        pending = next((t for t in targets if not t["message_id"]), targets[0])
+        await state.set_data(
+            {
+                "recover_contest_id": row["id"],
+                "recover_channel_id": pending["channel_id"],
+            }
+        )
+        title = db.one(
+            "SELECT title FROM channels WHERE id=?", (pending["channel_id"],)
+        )[0]
         await ui.edit(
             c,
-            tr(
+            html.escape(title)
+            + "\n"
+            + tr(
                 "Перешлите исходный пост из канала или отправьте его числовой ID сообщения. Он нужен для кнопки участия и обновления итогов."
             ),
             ui.back(f"contest:manage:{row['id']}"),
@@ -1458,9 +1589,10 @@ async def recover_message(m, state):
     if row["owner_id"] != m.from_user.id or row["status"] != "uncertain":
         raise ValueError(tr("Этот шаг устарел. Откройте настройку заново."))
     origin = m.forward_origin
+    channel_id = data.get("recover_channel_id", row["channel_id"])
     if origin and origin.type == "channel":
         target_chat = db.one(
-            "SELECT telegram_chat_id FROM channels WHERE id=?", (row["channel_id"],)
+            "SELECT telegram_chat_id FROM channels WHERE id=?", (channel_id,)
         )
         if origin.chat.id != target_chat[0]:
             raise ValueError(tr("Используйте кнопку в исходном посте канала."))
@@ -1473,10 +1605,22 @@ async def recover_message(m, state):
             )
         message_id = int(raw)
     db.execute(
-        "UPDATE contests SET status='active',published_ids=?,displayed_count=-1,error=NULL WHERE id=? AND status='uncertain'",
-        (json.dumps([message_id]), row["id"]),
+        "INSERT INTO contest_publications(contest_id,channel_id,message_id) VALUES(?,?,?) ON CONFLICT(contest_id,channel_id) DO UPDATE SET message_id=excluded.message_id",
+        (row["id"], channel_id, message_id),
+    )
+    if channel_id == row["channel_id"]:
+        db.execute(
+            "UPDATE contests SET published_ids=? WHERE id=?",
+            (json.dumps([message_id]), row["id"]),
+        )
+    pending = any(not t["message_id"] for t in service.publication_targets(row))
+    db.execute(
+        "UPDATE contests SET status=?,displayed_count=-1,error=NULL WHERE id=? AND status='uncertain'",
+        ("uncertain" if pending else "active", row["id"]),
     )
     await state.clear()
-    await m.answer(
-        tr("✅ Решение сохранено."), reply_markup=ui.back(f"contest:manage:{row['id']}")
+    await ui.answer(
+        m,
+        tr("✅ Решение сохранено."),
+        reply_markup=ui.back(f"contest:manage:{row['id']}"),
     )

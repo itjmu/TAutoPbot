@@ -12,6 +12,102 @@ with patch.dict(os.environ, DB_FILE=":memory:", BOT_TOKEN="", ADMIN_ID="12345"):
 
 
 class DownloadTests(unittest.TestCase):
+    def multilingual_formats(self, original="ru"):
+        return [
+            {
+                "format_id": "1080",
+                "height": 1080,
+                "protocol": "https",
+                "ext": "mp4",
+                "vcodec": "h264",
+                "acodec": "none",
+            },
+            {
+                "format_id": "360",
+                "height": 360,
+                "protocol": "https",
+                "ext": "mp4",
+                "vcodec": "h264",
+                "acodec": "none",
+            },
+            {
+                "format_id": "dub",
+                "protocol": "https",
+                "ext": "m4a",
+                "vcodec": "none",
+                "acodec": "aac",
+                "language": "en",
+                "language_preference": -1,
+                "abr": 129.539,
+            },
+            {
+                "format_id": "original",
+                "protocol": "https",
+                "ext": "m4a",
+                "vcodec": "none",
+                "acodec": "aac",
+                "language": original,
+                "language_preference": 10,
+                "abr": 129.538,
+            },
+        ]
+
+    def test_original_audio_wins_over_slightly_higher_bitrate_dub(self):
+        for language in ("ru", "en", "kk"):
+            with self.subTest(language=language):
+                choices = d.media_choices(
+                    {"formats": self.multilingual_formats(language)}
+                )
+                self.assertEqual(
+                    [c["format"] for c in choices],
+                    ["1080+original", "360+original", "original"],
+                )
+
+    def test_muxed_dub_does_not_override_original_audio(self):
+        formats = self.multilingual_formats()
+        formats.append(
+            {
+                **formats[0],
+                "format_id": "muxed",
+                "acodec": "aac",
+                "language_preference": -1,
+            }
+        )
+        self.assertEqual(
+            d.media_choices({"formats": formats})[0]["format"], "1080+original"
+        )
+
+    def test_playlist_offers_quality_and_mp3_and_resolves_each_video(self):
+        choices = d.playlist_choices()
+        self.assertEqual(
+            [c["max_height"] for c in choices[:-1]],
+            [2160, 1440, 1080, 720, 480, 360, 240, 144],
+        )
+        info = {"formats": self.multilingual_formats()}
+        self.assertEqual(
+            d.playlist_format(info, {"kind": "video", "max_height": 720}),
+            "360+original",
+        )
+        self.assertEqual(d.playlist_format(info, choices[0]), "1080+original")
+        self.assertEqual(d.playlist_format(info, choices[-1]), "original")
+        with self.assertRaises(ValueError):
+            d.playlist_format(info, {"kind": "video", "max_height": 144})
+
+    def test_playlist_inspection_returns_quality_buttons(self):
+        session = MagicMock()
+        session.__enter__.return_value.extract_info.return_value = {
+            "_type": "playlist",
+            "title": "List",
+            "entries": [{"url": "https://example.org/video", "title": "Video"}],
+        }
+        with (
+            patch.object(d, "youtube_session", return_value=session),
+            patch.object(d, "ydl_options", return_value={}),
+        ):
+            info = d.inspect_download("https://example.org/list", Path("."))
+        self.assertEqual(info["backend"], "playlist")
+        self.assertEqual(info["choices"], d.playlist_choices())
+
     def test_locked_progress_file_does_not_abort_download_and_next_update_retries(self):
         from services import progress
 

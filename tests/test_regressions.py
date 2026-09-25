@@ -115,7 +115,7 @@ class BotTests(unittest.TestCase):
         from unittest.mock import Mock
 
         dispatcher = SimpleNamespace(
-            fsm=SimpleNamespace(get_context=Mock(return_value=state))
+            fsm=SimpleNamespace(get_context=Mock(return_value=state)),
         )
         with (
             patch.object(channels, "register_channel", new=AsyncMock()) as register,
@@ -193,29 +193,35 @@ class BotTests(unittest.TestCase):
         self.assertEqual(media[1].cover, "cover")
         self.assertNotIn("cover", media[0].model_dump(exclude_none=True))
 
-    def test_channel_setup_link_uses_current_bot_username(self):
+    def test_channel_setup_requests_admin_rights_for_both_chat_types(self):
         from app.features import channels
 
         state = SimpleNamespace(set_state=AsyncMock())
         callback = SimpleNamespace(
+            message=SimpleNamespace(answer=AsyncMock()),
             from_user=SimpleNamespace(
                 id=42, username="u", first_name="U", last_name=None
             ),
             answer=AsyncMock(),
         )
         api = SimpleNamespace(
-            get_me=AsyncMock(return_value=SimpleNamespace(username="ExampleBot"))
+            get_me=AsyncMock(return_value=SimpleNamespace(username="ExampleBot")),
+            delete_message=AsyncMock(),
         )
         with patch.object(ui, "edit", new=AsyncMock()) as edit:
             asyncio.run(channels.channel_add(callback, state, api))
-        button = edit.await_args.args[2].inline_keyboard[0][0]
-        self.assertEqual(button.callback_data, "channel:picker")
-        self.assertIsNone(button.url)
-        group_url = edit.await_args.args[2].inline_keyboard[0][1].url
+        buttons = callback.message.answer.await_args.kwargs["reply_markup"].keyboard[0]
+        self.assertTrue(buttons[0].request_chat.chat_is_channel)
         self.assertTrue(
-            group_url.startswith("https://t.me/ExampleBot?startgroup&admin=")
+            buttons[0].request_chat.bot_administrator_rights.can_post_messages
         )
-        self.assertIn("restrict_members", group_url)
+        self.assertFalse(buttons[1].request_chat.chat_is_channel)
+        self.assertTrue(
+            buttons[1].request_chat.bot_administrator_rights.can_restrict_members
+        )
+        self.assertFalse(
+            any(b.url for row in edit.await_args.args[2].inline_keyboard for b in row)
+        )
 
     def setUp(self):
         self.old = database.db
@@ -598,15 +604,20 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         client = SimpleNamespace(
             get_me=AsyncMock(return_value=SimpleNamespace(username="offline")),
-            session=SimpleNamespace(close=AsyncMock(side_effect=close_session)),
+            session=SimpleNamespace(
+                middleware=lambda middleware: None,
+                close=AsyncMock(side_effect=close_session),
+            ),
         )
         dispatcher = SimpleNamespace(
             include_router=Mock(),
             resolve_used_update_types=Mock(return_value=["message"]),
             start_polling=AsyncMock(),
+            update=SimpleNamespace(outer_middleware=Mock()),
+            storage=SimpleNamespace(close=AsyncMock()),
         )
         scheduler = SimpleNamespace(
-            add_job=Mock(), start=Mock(), shutdown=Mock(), running=True
+            add_job=Mock(), start=Mock(), pause=Mock(), shutdown=Mock(), running=True
         )
         try:
             with (
@@ -623,7 +634,14 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
             dispatcher.start_polling.assert_awaited_once()
             self.assertEqual(events, ["jobs", "telegram"])
             self.assertIsNone(database.db)
-            self.assertEqual(scheduler.add_job.call_count, 8)
+            self.assertEqual(scheduler.add_job.call_count, 10)
+            self.assertEqual(
+                dispatcher.start_polling.await_args.kwargs["tasks_concurrency_limit"],
+                100,
+            )
+            self.assertFalse(
+                dispatcher.start_polling.await_args.kwargs["close_bot_session"]
+            )
         finally:
             if database.db is not None:
                 database.db.close()
