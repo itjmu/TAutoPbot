@@ -375,12 +375,77 @@ def button_icon(button):
     return button.model_copy(update={"text": f"{icon} {button.text}"})
 
 
+def button_style(button):
+    """Four semantic categories; None lets Telegram use its neutral theme style."""
+    if button.style is not None:
+        return button
+    data = button.callback_data or ""
+    parts = set(data.split(":"))
+    label = button.text.lstrip()
+    if data.startswith("au:block:"):
+        style = "danger" if data.endswith(":1") else "success"
+    elif label.startswith(("❌", "✖", "🗑", "🚫", "⏹")) or parts & {
+        "delete",
+        "del",
+        "erase",
+        "remove",
+        "cancel",
+        "stop",
+        "reject",
+        "revoke",
+        "clear",
+        "block",
+    }:
+        style = "danger"
+    elif label.startswith(("⬅", "←", "➡", "→")) or parts & {
+        "back",
+        "prev",
+        "next",
+        "noop",
+        "demo",
+    }:
+        style = None
+    elif (
+        label.startswith(("✅", "💾", "🚀", "➕"))
+        or parts
+        & {
+            "save",
+            "confirm",
+            "done",
+            "yes",
+            "approve",
+            "accept",
+            "publish",
+            "send",
+            "start",
+            "create",
+            "new",
+            "add",
+            "participate",
+            "unblock",
+            "pay",
+            "activate",
+        }
+        or button.pay
+    ):
+        style = "success"
+    elif (
+        button.url
+        or not data
+        or parts & {"select", "toggle", "choice", "value", "position"}
+    ):
+        style = None
+    else:
+        style = "primary"
+    return button.model_copy(update={"style": style})
+
+
 def readable_rows(rows, decorate=True):
     result = []
     for row in rows:
         pending = []
         for original in row:
-            button = button_icon(original) if decorate else original
+            button = button_style(button_icon(original)) if decorate else original
             width = 1 if len(button.text) > 32 else 2 if len(button.text) > 16 else 3
             if pending and len(pending) >= min(width, *(item[1] for item in pending)):
                 result.append([item[0] for item in pending])

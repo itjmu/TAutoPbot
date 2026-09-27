@@ -74,13 +74,16 @@ class ProgressMessage:
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(
-                            text=tr("⏹ Остановить"), callback_data="download:cancel"
+                            text=tr("⏹ Остановить"),
+                            callback_data="download:cancel",
+                            style="danger",
                         )
                     ],
                     [
                         InlineKeyboardButton(
                             text="🏠 " + tr("Главное меню"),
                             callback_data="download:menu",
+                            style="primary",
                         )
                     ],
                 ]

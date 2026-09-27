@@ -81,6 +81,7 @@ async def channel_add(c: CallbackQuery, state: FSMContext, bot: Bot):
                 [
                     KeyboardButton(
                         text=tr("➕ Выбрать канал и добавить бота"),
+                        style="success",
                         request_chat=KeyboardButtonRequestChat(
                             request_id=701,
                             chat_is_channel=True,
@@ -90,6 +91,7 @@ async def channel_add(c: CallbackQuery, state: FSMContext, bot: Bot):
                     ),
                     KeyboardButton(
                         text=tr("➕ Выбрать группу"),
+                        style="success",
                         request_chat=KeyboardButtonRequestChat(
                             request_id=702,
                             chat_is_channel=False,
