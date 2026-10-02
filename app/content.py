@@ -330,7 +330,9 @@ def message_payload(m):
             break
     if typ == "text" and m.text is None:
         raise ValueError(
-            tr("Поддерживаются текст, фото, видео, кружок, GIF, документ, аудио и voice.")
+            tr(
+                "Поддерживаются текст, фото, видео, кружок, GIF, документ, аудио и voice."
+            )
         )
     buttons = []
     if m.reply_markup:
@@ -513,10 +515,31 @@ class PartialAlbumError(Exception):
         self.messages = messages
 
 
-async def send_content(bot, chat_id, d, reply_markup=None):
+def delivered_payload(payload, index):
+    """Snapshot one delivered message, including album/note companions."""
+    typ = payload["content_type"]
+    if typ == "album":
+        items = entity_list(payload.get("media_json"))
+        if index < len(items):
+            return dict(items[index], album=True)
+        return dict(content_type="text", text=tr("Кнопки к публикации ↑"))
+    if typ == "video_note" and index:
+        return dict(
+            content_type="text",
+            text=payload.get("text") or "",
+            entities_json=payload.get("caption_entities_json"),
+        )
+    if typ == "video_note":
+        return dict(payload, text="", caption_entities_json=None)
+    return dict(payload)
+
+
+async def send_content(bot, chat_id, d, reply_markup=None, *, message_thread_id=None):
     typ = d["content_type"]
     text = d.get("text") or ""
     protection = {"protect_content": True} if d.get("protect_content") else {}
+    if message_thread_id is not None:
+        protection["message_thread_id"] = message_thread_id
     if typ == "album":
         classes = {
             "photo": InputMediaPhoto,

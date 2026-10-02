@@ -1,6 +1,7 @@
 """Offline database maintenance. Never starts polling or sends Telegram messages."""
 
 import argparse
+import json
 import os
 import sqlite3
 import tempfile
@@ -34,10 +35,16 @@ def backup(path):
     return target
 
 
-def health(path, max_age=90):
+def health(path, max_age=90, *, details=False):
     """Read-only liveness check suitable for an external monitor."""
     with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
         row = conn.execute("SELECT heartbeat FROM runtime_lock WHERE id=1").fetchone()
+        metrics = None
+        if details:
+            saved = conn.execute(
+                "SELECT value FROM app_settings WHERE key='runtime_metrics'"
+            ).fetchone()
+            metrics = json.loads(saved[0]) if saved else None
     if not row:
         raise RuntimeError("Bot heartbeat is missing")
     heartbeat = datetime.fromisoformat(row[0])
@@ -45,6 +52,7 @@ def health(path, max_age=90):
         heartbeat = heartbeat.replace(tzinfo=timezone.utc)
     if (datetime.now(timezone.utc) - heartbeat).total_seconds() > max_age:
         raise RuntimeError("Bot heartbeat is stale")
+    return metrics
 
 
 def reset(path, *, keep_backup=True):
@@ -94,6 +102,11 @@ def main():
     parser.add_argument("--database", default=DB_FILE)
     parser.add_argument("--confirm-reset", action="store_true")
     parser.add_argument(
+        "--details",
+        action="store_true",
+        help="Show runtime queue and latency metrics with health",
+    )
+    parser.add_argument(
         "--no-backup",
         action="store_true",
         help="Explicitly discard old data on reset without creating a backup",
@@ -105,7 +118,9 @@ def main():
         print(backup(path))
         return
     if args.action == "health":
-        health(path)
+        metrics = health(path, details=args.details)
+        if args.details:
+            print(json.dumps(metrics, indent=2))
         print("Bot heartbeat: OK")
         return
     if args.action == "reset" and not args.confirm_reset:

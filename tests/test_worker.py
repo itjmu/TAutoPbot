@@ -10,6 +10,34 @@ from pathlib import Path
 
 
 class WorkerTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows Job Object lifecycle")
+    def test_worker_exit_terminates_descendant_process(self):
+        import ctypes
+        from ctypes import wintypes
+
+        code = "from services.worker_limits import apply_worker_limits; import subprocess,sys; apply_worker_limits(); child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW); print(child.pid,flush=True)"
+        parent = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        self.assertEqual(parent.returncode, 0, parent.stderr)
+        pid = int(parent.stdout.strip())
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel.WaitForSingleObject.restype = wintypes.DWORD
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x100000, False, pid)
+        if handle:
+            try:
+                self.assertEqual(kernel.WaitForSingleObject(handle, 5000), 0)
+            finally:
+                kernel.CloseHandle(handle)
+
     def test_os_lock_releases_immediately_after_process_exit(self):
         from app.scheduler import RuntimeLock
 

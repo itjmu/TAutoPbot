@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import time
+from collections import OrderedDict
 from collections.abc import Callable, Coroutine
 
 from app.i18n import tr
@@ -14,6 +16,7 @@ class BackgroundJobs:
         self.tasks: dict[int, asyncio.Task] = {}
         self.labels: dict[int, str] = {}
         self.closing = False
+        self.admissions = OrderedDict()
 
     def active(self, user_id):
         task = self.tasks.get(user_id)
@@ -30,6 +33,16 @@ class BackgroundJobs:
             )
         if len(self.tasks) >= 32:
             raise ValueError(tr("Очередь загрузок заполнена. Попробуйте позже."))
+        now = time.monotonic()
+        recent = [
+            stamp for stamp in self.admissions.get(user_id, ()) if now - stamp < 60
+        ]
+        if len(recent) >= 6:
+            raise ValueError(tr("Очередь загрузок заполнена. Попробуйте позже."))
+        self.admissions[user_id] = recent + [now]
+        self.admissions.move_to_end(user_id)
+        if len(self.admissions) > 8192:
+            self.admissions.popitem(last=False)
         task = asyncio.create_task(factory(), name=f"download:{user_id}")
         self.tasks[user_id] = task
         self.labels[user_id] = label

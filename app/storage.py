@@ -15,38 +15,47 @@ class SQLiteStorage(BaseStorage):
 
     async def set_state(self, key, state=None):
         value = state.state if isinstance(state, State) else state
-        await database.async_call(
-            lambda conn: (
-                conn.execute(
-                    "INSERT INTO fsm_state(storage_key,state) VALUES(?,?) ON CONFLICT(storage_key) DO UPDATE SET state=excluded.state",
-                    (self.key(key), value),
-                ).rowcount
+
+        def save(conn):
+            conn.execute(
+                "INSERT INTO fsm_state(storage_key,state) VALUES(?,?) ON CONFLICT(storage_key) DO UPDATE SET state=excluded.state",
+                (self.key(key), value),
             )
-        )
+            conn.execute(
+                "DELETE FROM fsm_state WHERE storage_key=? AND state IS NULL AND data='{}'",
+                (self.key(key),),
+            )
+
+        await database.async_call(save)
 
     async def get_state(self, key):
         r = await database.async_call(
             lambda conn: conn.execute(
                 "SELECT state FROM fsm_state WHERE storage_key=?", (self.key(key),)
-            ).fetchone()
+            ).fetchone(),
+            readonly=True,
         )
         return r["state"] if r else None
 
     async def set_data(self, key, data):
-        await database.async_call(
-            lambda conn: (
-                conn.execute(
-                    "INSERT INTO fsm_state(storage_key,data) VALUES(?,?) ON CONFLICT(storage_key) DO UPDATE SET data=excluded.data",
-                    (self.key(key), json.dumps(dict(data))),
-                ).rowcount
+        def save(conn):
+            conn.execute(
+                "INSERT INTO fsm_state(storage_key,data) VALUES(?,?) ON CONFLICT(storage_key) DO UPDATE SET data=excluded.data",
+                (self.key(key), json.dumps(dict(data))),
             )
-        )
+            conn.execute(
+                "DELETE FROM fsm_state WHERE storage_key=? AND state IS NULL AND data='{}'",
+                (self.key(key),),
+            )
+
+        await database.async_call(save)
 
     async def get_data(self, key):
         r = await database.async_call(
             lambda conn: conn.execute(
                 "SELECT data FROM fsm_state WHERE storage_key=?", (self.key(key),)
-            ).fetchone()
+            ).fetchone(),
+            readonly=True,
         )
         return json.loads(r["data"]) if r else {}
 

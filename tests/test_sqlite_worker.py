@@ -6,11 +6,87 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from threading import RLock
 
 from services.sqlite_worker import SQLiteWorker
 
 
 class SQLiteWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_read_only_callback_does_not_reserve_writer_and_cannot_mutate(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / "read.db")
+            conn = sqlite3.connect(path)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE items(id INTEGER)")
+            conn.execute("INSERT INTO items VALUES(1)")
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            worker = SQLiteWorker(path)
+            try:
+                value = await asyncio.wait_for(
+                    worker.call(
+                        lambda db: db.execute("SELECT COUNT(*) FROM items").fetchone()[
+                            0
+                        ],
+                        readonly=True,
+                    ),
+                    2,
+                )
+                self.assertEqual(value, 1)
+                with self.assertRaises(sqlite3.OperationalError):
+                    await worker.call(
+                        lambda db: db.execute("INSERT INTO items VALUES(2)").rowcount,
+                        readonly=True,
+                    )
+            finally:
+                conn.rollback()
+                await worker.close()
+                conn.close()
+
+    async def test_mixed_coordinated_writers_preserve_all_commits(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / "mixed.db")
+            conn = sqlite3.connect(path, timeout=0.05)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE items(id INTEGER PRIMARY KEY)")
+            conn.commit()
+            gate = RLock()
+            worker = SQLiteWorker(path, write_gate=gate)
+
+            async def direct():
+                for index in range(200):
+                    with gate:
+                        conn.execute("INSERT INTO items VALUES(?)", (index,))
+                        conn.commit()
+                    await asyncio.sleep(0)
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        direct(),
+                        *(
+                            worker.call(
+                                lambda db, i=i: (
+                                    db.execute(
+                                        "INSERT INTO items VALUES(?)", (i,)
+                                    ).rowcount
+                                )
+                            )
+                            for i in range(200, 400)
+                        ),
+                    ),
+                    10,
+                )
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM items").fetchone()[0], 400
+                )
+                self.assertEqual(
+                    conn.execute("PRAGMA integrity_check").fetchone()[0], "ok"
+                )
+            finally:
+                await worker.close()
+                conn.close()
+
     async def test_durable_batches_and_failed_callback_rollback(self):
         with tempfile.TemporaryDirectory() as folder:
             path = str(Path(folder) / "test.db")

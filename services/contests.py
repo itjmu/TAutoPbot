@@ -6,7 +6,9 @@ import html
 import json
 import logging
 import secrets
+import time
 from datetime import timedelta
+from weakref import WeakValueDictionary
 
 from aiogram.exceptions import (
     TelegramBadRequest,
@@ -20,7 +22,7 @@ from app import database as db
 from app.i18n import language_context, tr
 
 log = logging.getLogger(__name__)
-_post_locks = {}
+_post_locks = WeakValueDictionary()
 _closing_tasks = {}
 
 
@@ -79,9 +81,13 @@ async def checked_member(bot, row, chat_id, uid):
     present = member.status in {"creator", "administrator", "member"} or (
         member.status == "restricted" and member.is_member
     )
-    db.execute(
-        "INSERT OR REPLACE INTO contest_checks VALUES(?,?,?,?,?)",
-        (row["id"], uid, chat_id, int(present), timeutils.iso()),
+    await db.async_call(
+        lambda conn: (
+            conn.execute(
+                "INSERT OR REPLACE INTO contest_checks VALUES(?,?,?,?,?)",
+                (row["id"], uid, chat_id, int(present), timeutils.iso()),
+            ).rowcount
+        ),
     )
     return present
 
@@ -90,18 +96,28 @@ def kind_label(row):
     return tr("Конкурс") if row["mode"] == "ranking" else tr("Розыгрыш")
 
 
-def participant_count(cid):
-    row = get(cid)
+def participant_count(cid, connection=None):
+    connection = db.db if connection is None else connection
+    row = connection.execute("SELECT * FROM contests WHERE id=?", (cid,)).fetchone()
+    if not row["referral_min"]:
+        return connection.execute(
+            "SELECT COUNT(*) FROM contest_entries e WHERE e.contest_id=? AND e.base_valid=1 "
+            "AND NOT EXISTS(SELECT 1 FROM blocked_users b WHERE b.telegram_id=e.user_id)",
+            (cid,),
+        ).fetchone()[0]
     table = (
         "contest_channel_referrals"
         if row["referral_target"] == "channel"
         else "contest_entries"
     )
     valid = "active=1" if row["referral_target"] == "channel" else "base_valid=1"
-    return db.one(
-        f"SELECT COUNT(*) FROM contest_entries e WHERE e.contest_id=? AND e.base_valid=1 AND e.user_id NOT IN (SELECT telegram_id FROM blocked_users) AND (SELECT COUNT(*) FROM {table} r WHERE r.contest_id=e.contest_id AND r.inviter_id=e.user_id AND r.{valid}) >= ?",
-        (cid, row["referral_min"]),
-    )[0]
+    return connection.execute(
+        f"SELECT COUNT(*) FROM contest_entries e JOIN (SELECT inviter_id FROM {table} "
+        f"WHERE contest_id=? AND {valid} AND inviter_id IS NOT NULL GROUP BY inviter_id "
+        "HAVING COUNT(*)>=?) r ON r.inviter_id=e.user_id WHERE e.contest_id=? AND e.base_valid=1 "
+        "AND NOT EXISTS(SELECT 1 FROM blocked_users b WHERE b.telegram_id=e.user_id)",
+        (cid, row["referral_min"], cid),
+    ).fetchone()[0]
 
 
 def public_markup(row, count=None):
@@ -128,16 +144,17 @@ def public_markup(row, count=None):
     return ui.kb(buttons)
 
 
-def publication_targets(row):
-    targets = db.all_rows(
+def publication_targets(row, connection=None):
+    connection = db.db if connection is None else connection
+    targets = connection.execute(
         "SELECT p.channel_id,p.message_id,c.telegram_chat_id FROM contest_publications p JOIN channels c ON c.id=p.channel_id WHERE p.contest_id=? ORDER BY p.channel_id",
         (row["id"],),
-    )
+    ).fetchall()
     if targets:
         return targets
-    channel = db.one(
+    channel = connection.execute(
         "SELECT telegram_chat_id FROM channels WHERE id=?", (row["channel_id"],)
-    )
+    ).fetchone()
     ids = json.loads(row["published_ids"])
     return [
         dict(
@@ -154,9 +171,22 @@ async def refresh_count(bot, cid):
         row = get(cid)
         if not is_open(row):
             return
+        if time.monotonic() - getattr(lock, "last_refresh", 0) < 1:
+            return  # queued clicks coalesce; rotating refreshes converge later
+        lock.last_refresh = time.monotonic()
         ids = json.loads(row["published_ids"])
-        count = participant_count(cid)
-        if not ids or row["displayed_count"] == count:
+        count = await db.async_call(
+            lambda conn: participant_count(cid, conn), readonly=True
+        )
+        if not is_open(get(cid)):
+            return
+        if row["displayed_count"] == count:
+            db.execute(
+                "UPDATE contests SET count_dirty=0 WHERE id=? AND count_revision=?",
+                (cid, row["count_revision"]),
+            )
+            return
+        if not ids:
             return
         try:
             for target in publication_targets(row):
@@ -177,7 +207,10 @@ async def refresh_count(bot, cid):
         except Exception:
             log.exception("Cannot update participant count for %s", cid)
             return
-        db.execute("UPDATE contests SET displayed_count=? WHERE id=?", (count, cid))
+        db.execute(
+            "UPDATE contests SET displayed_count=?,count_dirty=CASE WHEN count_revision=? THEN 0 ELSE 1 END WHERE id=?",
+            (count, row["count_revision"], cid),
+        )
 
 
 def publication(row):
@@ -300,23 +333,43 @@ def choose(entries, mode, count, bonus):
             )[:count]
         ]
     result = []
-    while eligible and len(result) < count:
-        weights = [
-            1 + bonus * counts[e["user_id"]] if mode == "weighted" else 1
-            for e in eligible
-        ]
-        ticket = secrets.randbelow(sum(weights))
-        for index, weight in enumerate(weights):
-            ticket -= weight
-            if ticket < 0:
-                entry = eligible.pop(index)
-                result.append((entry, counts[entry["user_id"]]))
-                break
+    weights = [
+        1 + bonus * counts[e["user_id"]] if mode == "weighted" else 1 for e in eligible
+    ]
+    tree = [0] + weights.copy()
+    size = len(weights)
+    for index in range(1, size + 1):
+        parent = index + (index & -index)
+        if parent <= size:
+            tree[parent] += tree[index]
+    total = sum(weights)
+    # Fenwick prefix sums preserve the exact weighted, without-replacement
+    # ticket distribution, avoiding rescanning all participants for each winner.
+    for _ in range(min(count, size)):
+        ticket = secrets.randbelow(total)
+        index = 0
+        step = 1 << (size.bit_length() - 1)
+        while step:
+            candidate = index + step
+            if candidate <= size and tree[candidate] <= ticket:
+                ticket -= tree[candidate]
+                index = candidate
+            step >>= 1
+        entry = eligible[index]
+        result.append((entry, counts[entry["user_id"]]))
+        weight = weights[index]
+        total -= weight
+        position = index + 1
+        while position <= size:
+            tree[position] -= weight
+            position += position & -position
+        weights[index] = 0
     return result
 
 
-def enqueue(cid, kind, recipient, payload):
-    db.db.execute(
+def enqueue(cid, kind, recipient, payload, connection=None):
+    connection = db.db if connection is None else connection
+    connection.execute(
         "INSERT OR IGNORE INTO contest_outbox(contest_id,kind,recipient,payload) VALUES(?,?,?,?)",
         (cid, kind, recipient, json.dumps(payload, ensure_ascii=False)),
     )
@@ -341,21 +394,51 @@ async def finish(bot, row):
                 channel_scores[referral["inviter_id"]] = (
                     channel_scores.get(referral["inviter_id"], 0) + 1
                 )
-    for entry in db.all_rows(
-        "SELECT * FROM contest_entries WHERE contest_id=? AND base_valid=1", (cid,)
-    ):
+    subscriptions = json.loads(row["subscriptions_json"])
+
+    async def validate_entry(entry):
         valid = not accounts.blocked(entry["user_id"])
-        for chat in json.loads(row["subscriptions_json"]):
+        for chat in subscriptions:
             if valid and not await checked_member(
                 bot, row, chat["chat_id"], entry["user_id"]
             ):
                 valid = False
         if valid:
-            entries.append(dict(entry, referral_min=row["referral_min"]))
+            eligible = dict(entry, referral_min=row["referral_min"])
             if row["referral_target"] == "channel":
-                entries[-1]["referral_score"] = channel_scores.get(entry["user_id"], 0)
+                eligible["referral_score"] = channel_scores.get(entry["user_id"], 0)
+            return eligible
+        return None
+
+    cursor = -1
+    while True:
+        page = await db.async_call(
+            lambda conn: conn.execute(
+                "SELECT * FROM contest_entries WHERE contest_id=? AND base_valid=1 AND user_id>? ORDER BY user_id LIMIT 128",
+                (cid, cursor),
+            ).fetchall(),
+            readonly=True,
+        )
+        if not page:
+            break
+        cursor = page[-1]["user_id"]
+        for offset in range(0, len(page), 8):
+            # All started checks finish before propagation; retries cannot overlap
+            # orphan verification tasks or race a durable final draw.
+            checked = await asyncio.gather(
+                *(validate_entry(entry) for entry in page[offset : offset + 8]),
+                return_exceptions=True,
+            )
+            error = next(
+                (item for item in checked if isinstance(item, BaseException)), None
+            )
+            if error is not None:
+                raise error
+            entries.extend(item for item in checked if item is not None)
     # No writes or random draw until every subscription check succeeded.
-    selected = choose(entries, row["mode"], row["winner_count"], row["referral_bonus"])
+    selected = await asyncio.to_thread(
+        choose, entries, row["mode"], row["winner_count"], row["referral_bonus"]
+    )
     # A cached eligibility check must never award a prize to a winner who left later.
     while selected:
         invalid = set()
@@ -367,22 +450,42 @@ async def finish(bot, row):
         if not invalid:
             break
         entries = [entry for entry in entries if entry["user_id"] not in invalid]
-        selected = choose(
-            entries, row["mode"], row["winner_count"], row["referral_bonus"]
+        selected = await asyncio.to_thread(
+            choose, entries, row["mode"], row["winner_count"], row["referral_bonus"]
         )
     prize = json.loads(row["prize_json"])
-    names = []
-    with db.atomic():
-        if get(cid)["status"] != "closing":
+
+    def commit_draw(connection):
+        names = []  # retries must not append names from a rolled-back attempt
+        if (
+            connection.execute(
+                "SELECT status FROM contests WHERE id=?", (cid,)
+            ).fetchone()[0]
+            != "closing"
+        ):
             return
-        db.db.execute(
-            "UPDATE contest_entries SET base_valid=0 WHERE contest_id=?", (cid,)
-        )
-        for entry in entries:
-            db.db.execute(
-                "UPDATE contest_entries SET base_valid=1 WHERE contest_id=? AND user_id=?",
-                (cid, entry["user_id"]),
+        valid_ids = {entry["user_id"] for entry in entries}
+        if any(
+            connection.execute(
+                "SELECT 1 FROM blocked_users WHERE telegram_id=?", (entry["user_id"],)
+            ).fetchone()
+            for entry, _ in selected
+        ):
+            raise ValueError(
+                "Winner eligibility changed during draw; verification will retry"
             )
+        invalid = [
+            (cid, entry[0])
+            for entry in connection.execute(
+                "SELECT user_id FROM contest_entries WHERE contest_id=? AND base_valid=1",
+                (cid,),
+            )
+            if entry[0] not in valid_ids
+        ]
+        connection.executemany(
+            "UPDATE contest_entries SET base_valid=0 WHERE contest_id=? AND user_id=?",
+            invalid,
+        )
         for rank, (entry, score) in enumerate(selected, 1):
             uid = entry["user_id"]
             award = {
@@ -396,14 +499,14 @@ async def finish(bot, row):
                 if row["prize_kind"] == "promo"
                 else prize["value"],
             }
-            db.db.execute(
+            connection.execute(
                 "INSERT INTO contest_winners VALUES(?,?,?,?,?)",
                 (cid, uid, rank, score, json.dumps(award, ensure_ascii=False)),
             )
-            enqueue(cid, "winner", uid, award)
-            user = db.one(
+            enqueue(cid, "winner", uid, award, connection)
+            user = connection.execute(
                 "SELECT username,first_name FROM users WHERE telegram_id=?", (uid,)
-            )
+            ).fetchone()
             label = (
                 "@" + user["username"]
                 if user and user["username"]
@@ -434,23 +537,27 @@ async def finish(bot, row):
             if row["claim_contact"]
             else tr("Ожидайте, скоро с вами свяжутся для вручения призов.")
         )
-        for target in publication_targets(row):
+        for target in publication_targets(row, connection):
             enqueue(
                 cid,
                 "results",
                 target["telegram_chat_id"],
                 {"text": result, "message_id": target["message_id"]},
+                connection,
             )
         enqueue(
             cid,
             "owner",
             row["owner_id"],
             {"text": result + tr("\nПроверьте выдачу призов победителям.")},
+            connection,
         )
-        db.db.execute(
+        connection.execute(
             "UPDATE contests SET status='completed',error=NULL WHERE id=?", (cid,)
         )
-        db.db.execute("DELETE FROM contest_checks WHERE contest_id=?", (cid,))
+        connection.execute("DELETE FROM contest_checks WHERE contest_id=?", (cid,))
+
+    await db.async_call(commit_draw)
 
 
 async def deliver(bot):
@@ -522,7 +629,6 @@ async def deliver(bot):
                     except TelegramBadRequest as exc:
                         if "message is not modified" not in str(exc).lower():
                             raise
-                _post_locks.pop(row["id"], None)
             else:
                 await bot.send_message(item["recipient"], text, parse_mode=parse_mode)
             db.execute(
@@ -592,8 +698,11 @@ def recover():
 async def tick(bot):
     # Closing contests are supervised independently: they never hold the publication tick.
     rows = db.all_rows(
-        "SELECT * FROM contests WHERE status IN ('scheduled','active') AND (retry_at IS NULL OR retry_at<=?) ORDER BY starts_at LIMIT 200",
-        (timeutils.iso(),),
+        "SELECT * FROM contests WHERE (retry_at IS NULL OR retry_at<=?) AND "
+        "((status='scheduled' AND julianday(starts_at)<=julianday(?)) OR "
+        "(status='active' AND julianday(ends_at)<=julianday(?))) "
+        "ORDER BY COALESCE(retry_at,starts_at),id LIMIT 200",
+        (timeutils.iso(),) * 3,
     )
     slots = asyncio.Semaphore(4)
 
@@ -602,6 +711,18 @@ async def tick(bot):
             await process_contest(bot, row)
 
     await asyncio.gather(*(run(row) for row in rows))
+    # Rotate refreshes independently; active contests cannot starve due publications.
+    cursor = int(db.setting("contest_refresh_cursor") or 0)
+    refreshes = db.all_rows(
+        "SELECT id FROM contests WHERE status='active' AND count_dirty=1 AND id>? "
+        "AND (retry_at IS NULL OR retry_at<=?) ORDER BY id LIMIT 20",
+        (cursor, timeutils.iso()),
+    )
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings(key,value) VALUES('contest_refresh_cursor',?)",
+        (str(refreshes[-1]["id"] if refreshes else 0),),
+    )
+    await asyncio.gather(*(refresh_count(bot, row["id"]) for row in refreshes))
     await closing_tick(bot)
     await deliver(bot)
 

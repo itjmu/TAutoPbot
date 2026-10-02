@@ -8,6 +8,7 @@ class AddChannel(StatesGroup):
 
 
 class PostCreate(StatesGroup):
+    topic = State()
     content = State()
     schedule = State()
     delete = State()

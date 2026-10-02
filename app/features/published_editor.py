@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import re
 import secrets
+from types import SimpleNamespace
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -152,6 +154,7 @@ async def show_button_editor(bot, uid, oid):
             if "message to edit not found" not in str(exc).lower():
                 raise
     sent = await content.send_content(bot, uid, data["payload"], markup)
+    ui.note_transient(uid, sent)
     data.update(preview_id=sent.message_id, refresh_preview=False)
     store_session(uid, data)
     if old:
@@ -167,13 +170,30 @@ async def return_to_editor(c, state, oid):
     await preview(c.bot, c.from_user.id, state)
 
 
-async def check_access(bot, uid, chat_id):
+async def check_access(bot, uid, chat_id, message_id=None):
     if accounts.blocked(uid):
         raise ValueError("Доступ запрещён.")
     me = await bot.get_me()
     owner, member = await asyncio.gather(
         bot.get_chat_member(chat_id, uid), bot.get_chat_member(chat_id, me.id)
     )
+    channel = db.one(
+        "SELECT * FROM channels WHERE telegram_chat_id=? AND owner_telegram_id=? AND is_active=1",
+        (chat_id, uid),
+    )
+    if channel and channel["chat_type"] in {"group", "supergroup"}:
+        if not accounts.channel_allowed(uid, channel["id"]):
+            raise ValueError("Группа недоступна.")
+        if not message_id or not db.one(
+            "SELECT 1 FROM published_messages WHERE channel_id=? AND telegram_message_id=? AND deleted=0",
+            (channel["id"], message_id),
+        ):
+            raise ValueError(
+                "Можно редактировать только сообщения, опубликованные этим ботом в вашей группе."
+            )
+        if not await access.owner_and_bot_ok(bot, chat_id, uid):
+            raise ValueError("Вам и боту нужны права администратора группы.")
+        return
     for actor in (owner, member):
         if actor.status != "creator" and (
             actor.status != "administrator"
@@ -186,23 +206,29 @@ async def check_access(bot, uid, chat_id):
 
 def controls(data):
     token = data["token"]
-    rows = [[ui.choice("📝 Изменить текст / подпись", f"live:text:{token}")]]
+    note = data["payload"]["content_type"] == "video_note"
+    rows = (
+        []
+        if note
+        else [[ui.choice("📝 Изменить текст / подпись", f"live:text:{token}")]]
+    )
     rows.append([ui.choice("🔘 Кнопки", f"live:buttons:{token}")])
     if data.get("buttons"):
         rows.append([ui.choice("🗑 Удалить все кнопки", f"live:clearbuttons:{token}")])
-    rows.append(
-        [
-            ui.choice("🧩 Добавить шаблон", f"live:templates:{token}"),
-            ui.choice("🧹 Убрать чужие ссылки", f"live:clean:{token}"),
-        ]
-    )
+    if not note:
+        rows.append(
+            [
+                ui.choice("🧩 Добавить шаблон", f"live:templates:{token}"),
+                ui.choice("🧹 Убрать чужие ссылки", f"live:clean:{token}"),
+            ]
+        )
     rows.append([ui.choice("↩️ Сбросить изменения", f"live:undo:{token}")])
     if data["payload"]["content_type"] == "video":
         rows.append([ui.choice("🖼 Обложка видео", f"live:cover:{token}")])
     if data["payload"]["content_type"] in MEDIA:
         rows.append([ui.choice("🖼 Заменить медиа", f"live:media:{token}")])
     rows += [
-        [ui.choice("💾 Сохранить в канале", f"live:apply:{token}")],
+        [ui.choice("💾 Сохранить в канале/группе", f"live:apply:{token}")],
         [ui.choice("❌ Отмена", "live:cancel")],
     ]
     return ui.kb(rows)
@@ -244,6 +270,7 @@ async def preview(bot, uid, state):
                 raise
     sent = await content.send_content(bot, uid, data["payload"], markup)
     await state.update_data(preview_id=sent.message_id)
+    ui.note_transient(uid, sent)
     await state.set_state(PublishedEdit.ready)
     store_session(uid, await state.get_data())
     if old:
@@ -265,7 +292,11 @@ async def edit_payload(bot, chat_id, message_id, payload, markup, media_changed=
         payload.get("entities_json" if typ == "text" else "caption_entities_json")
     )
     try:
-        if typ == "text":
+        if typ == "video_note":
+            if media_changed:
+                raise ValueError("Для круглого видео можно изменить только кнопки.")
+            await bot.edit_message_reply_markup(**kwargs)
+        elif typ == "text":
             await bot.edit_message_text(
                 text=text, entities=entities, parse_mode=None, **kwargs
             )
@@ -297,7 +328,7 @@ async def apply_edit(bot, uid, data):
 
 
 async def apply_edit_locked(bot, uid, data):
-    await check_access(bot, uid, data["chat_id"])
+    await check_access(bot, uid, data["chat_id"], data["message_id"])
     inherit_edited(uid, data)
     payload = data["payload"]
     markup = live_markup(uid, data)
@@ -353,9 +384,57 @@ async def action(c, state, bot):
         await state.set_state(PublishedEdit.original)
         await ui.edit(
             c,
-            "✏️ Перешлите именно сообщение из канала, которое нужно изменить.\nИзменится только это сообщение, его ссылка и ID сохранятся. Для альбома перешлите один элемент.\nБоту и вам нужны права редактирования в канале. Если исходные кнопки не переданы Telegram и отсутствуют в базе бота, сохранить их автоматически невозможно.",
-            ui.back("menu:posts"),
+            "✏️ Перешлите сообщение из канала или отправьте ссылку на сообщение, опубликованное этим ботом в группе/теме. Изменится исходное сообщение; ссылка и ID сохранятся. Для альбома выберите один элемент. Вам и боту нужны права администратора.",
+            ui.kb(
+                [
+                    [ui.choice("📋 Мои публикации", "live:recent:0")],
+                    [ui.choice("⬅️ Назад", "menu:posts")],
+                ]
+            ),
         )
+        await c.answer()
+        return
+    if action == "recent":
+        page = max(0, int(parts[2]))
+        records = db.all_rows(
+            "SELECT pm.telegram_message_id,ch.id,ch.title,pt.message_thread_id,ft.name FROM published_messages pm JOIN channels ch ON ch.id=pm.channel_id JOIN post_targets pt ON pt.post_id=pm.post_id AND pt.channel_id=pm.channel_id LEFT JOIN forum_topics ft ON ft.chat_id=ch.telegram_chat_id AND ft.topic_id=pt.message_thread_id WHERE ch.owner_telegram_id=? AND ch.is_active=1 AND pm.deleted=0 ORDER BY pm.id DESC LIMIT 11 OFFSET ?",
+            (uid, page * 10),
+        )
+        rows = []
+        for row in records[:10]:
+            label = row["title"][:20]
+            if row["message_thread_id"]:
+                label += " · " + (row["name"] or str(row["message_thread_id"]))[:15]
+            label += f" · #{row['telegram_message_id']}"
+            rows.append(
+                [
+                    ui.choice(
+                        label, f"live:open:{row['id']}:{row['telegram_message_id']}"
+                    )
+                ]
+            )
+        navigation = []
+        if page:
+            navigation.append(ui.choice("◀️", f"live:recent:{page - 1}"))
+        if len(records) > 10:
+            navigation.append(ui.choice("▶️", f"live:recent:{page + 1}"))
+        if navigation:
+            rows.append(navigation)
+        rows.append([ui.choice("⬅️ Назад", "live:start")])
+        await ui.edit(
+            c, "📋 Выберите опубликованное сообщение для редактирования:", ui.kb(rows)
+        )
+        await c.answer()
+        return
+    if action == "open":
+        message = SimpleNamespace(
+            from_user=c.from_user,
+            forward_origin=None,
+            text=None,
+            reply_markup=None,
+            media_group_id=None,
+        )
+        await original(message, state, bot, saved_target=(int(parts[2]), int(parts[3])))
         await c.answer()
         return
     if action == "cancel":
@@ -415,25 +494,16 @@ async def action(c, state, bot):
             await show_button_editor(bot, uid, oid)
             await c.answer()
             return
-        if action == "clearbuttons":
-            await ui.edit(
-                c,
-                "Удалить все кнопки в предпросмотре? Канал изменится только после сохранения.",
-                ui.kb(
-                    [
-                        [
-                            ui.choice(
-                                "🗑 Удалить все", f"live:confirmclear:{data['token']}"
-                            )
-                        ],
-                        [ui.choice("⬅️ Назад", f"live:back:{data['token']}")],
-                    ]
-                ),
+        if action in {"clearbuttons", "confirmclear"}:
+            data.setdefault(
+                "original_unknown_markup", data.get("unknown_markup", False)
             )
-            await c.answer()
-            return
-        if action == "confirmclear":
-            data.update(buttons=[], buttons_changed=True)
+            data.update(buttons=[], buttons_changed=True, unknown_markup=False)
+        if data["payload"]["content_type"] == "video_note" and (
+            action in {"text", "media", "cover", "templates", "clean"}
+            or action.startswith("template_")
+        ):
+            raise ValueError("Для круглого видео можно изменить только кнопки.")
         if action == "templates":
             templates = db.all_rows(
                 "SELECT id,name FROM templates WHERE owner_id=? ORDER BY id DESC LIMIT 40",
@@ -494,10 +564,16 @@ async def action(c, state, bot):
             if not data.get("original_snapshot"):
                 raise ValueError("Исходный снимок недоступен. Перешлите пост заново.")
             data.update(json.loads(data["original_snapshot"]), buttons_changed=False)
+            if "original_unknown_markup" in data:
+                data["unknown_markup"] = data["original_unknown_markup"]
             data["media_changed"] = data["payload"]["content_type"] in MEDIA
-        if action in {"back", "clean", "undo", "confirmclear"} or action.startswith(
-            "template_"
-        ):
+        if action in {
+            "back",
+            "clean",
+            "undo",
+            "clearbuttons",
+            "confirmclear",
+        } or action.startswith("template_"):
             await state.set_data(data)
             await preview(bot, uid, state)
             await c.answer()
@@ -528,28 +604,93 @@ async def action(c, state, bot):
         await c.answer()
 
 
+def original_link(m):
+    match = re.fullmatch(
+        r"https?://t\.me/(?:(c)/([0-9]+)|([A-Za-z0-9_]+))/(?:[0-9]+/)?([0-9]+)(?:\?[^\s]*)?",
+        m.text.strip(),
+    )
+    if not match:
+        raise ValueError("Нужна ссылка Telegram на опубликованное сообщение.")
+    private, number, username, mid = match.groups()
+    channel = db.one(
+        "SELECT * FROM channels WHERE owner_telegram_id=? AND is_active=1 AND "
+        + ("telegram_chat_id=?" if private else "LOWER(username)=LOWER(?)"),
+        (m.from_user.id, int("-100" + number) if private else username),
+    )
+    if not channel or not accounts.channel_allowed(m.from_user.id, channel["id"]):
+        raise ValueError("Группа/канал недоступны.")
+    return saved_original(m.from_user.id, channel["id"], int(mid))
+
+
+def saved_original(uid, cid, mid):
+    channel = db.one(
+        "SELECT * FROM channels WHERE id=? AND owner_telegram_id=? AND is_active=1",
+        (cid, uid),
+    )
+    if not channel or not accounts.channel_allowed(uid, cid):
+        raise ValueError("Группа/канал недоступны.")
+    saved = db.one(
+        "SELECT pm.content_json,pt.payload_json FROM published_messages pm JOIN post_targets pt ON pt.post_id=pm.post_id AND pt.channel_id=pm.channel_id WHERE pm.channel_id=? AND pm.telegram_message_id=? AND pm.deleted=0",
+        (channel["id"], mid),
+    )
+    if not saved:
+        raise ValueError("Нет сохранённой публикации для этого сообщения.")
+    previous = db.setting(f"published_edit:{channel['telegram_chat_id']}:{int(mid)}")
+    if previous:
+        payload = json.loads(previous)["payload"]
+    elif saved and (saved["content_json"] or saved["payload_json"]):
+        payload = json.loads(saved["content_json"] or saved["payload_json"])
+        if payload["content_type"] == "album" and not saved["content_json"]:
+            raise ValueError("Для старого альбома перешлите нужный элемент из канала.")
+    else:
+        raise ValueError("Нет сохранённой публикации для этого сообщения.")
+    payload.pop("protect_content", None)
+    if payload["content_type"] == "video_note":
+        if not saved["content_json"]:
+            first = db.one(
+                "SELECT MIN(telegram_message_id) FROM published_messages WHERE channel_id=? AND post_id=(SELECT post_id FROM published_messages WHERE channel_id=? AND telegram_message_id=? LIMIT 1)",
+                (cid, cid, mid),
+            )[0]
+            if mid != first:
+                payload = content.delivered_payload(payload, 1)
+        if payload["content_type"] == "video_note":
+            payload = dict(payload, text="", caption_entities_json=None)
+    return SimpleNamespace(
+        chat=SimpleNamespace(id=channel["telegram_chat_id"]), message_id=int(mid)
+    ), payload
+
+
 @router.message(PublishedEdit.original, ~F.successful_payment, ~F.text.startswith("/"))
-async def original(m, state, bot):
-    origin = m.forward_origin
-    if not origin or origin.type != "channel":
-        raise ValueError(
-            "Нужна пересылка из канала с доступным источником, а не копия текста."
-        )
-    await check_access(bot, m.from_user.id, origin.chat.id)
-    payload = content.message_payload(m)
-    if payload["content_type"] not in {"text", "voice", *MEDIA}:
+async def original(m, state, bot, *, saved_target=None):
+    if saved_target is not None:
+        origin, payload = saved_original(m.from_user.id, *saved_target)
+    elif (
+        not m.forward_origin
+        and m.text
+        and m.text.startswith(("https://t.me/", "http://t.me/"))
+    ):
+        origin, payload = original_link(m)
+    else:
+        origin = m.forward_origin
+        if not origin or origin.type != "channel":
+            raise ValueError(
+                "Нужна пересылка из канала с доступным источником, а не копия текста."
+            )
+        payload = content.message_payload(m)
+    await check_access(bot, m.from_user.id, origin.chat.id, origin.message_id)
+    if payload["content_type"] not in {"text", "voice", "video_note", *MEDIA}:
         raise ValueError(
             "Это сообщение не поддерживает редактирование текста или медиа."
         )
     markup = m.reply_markup
     known = []
     saved = db.one(
-        "SELECT pm.post_id, pm.channel_id, pm.buttons_json, pt.payload_json FROM published_messages pm JOIN channels ch ON ch.id=pm.channel_id JOIN post_targets pt ON pt.post_id=pm.post_id AND pt.channel_id=pm.channel_id WHERE ch.telegram_chat_id=? AND pm.telegram_message_id=? AND pm.deleted=0",
+        "SELECT pm.post_id, pm.channel_id, pm.buttons_json, pm.content_json, pt.payload_json FROM published_messages pm JOIN channels ch ON ch.id=pm.channel_id JOIN post_targets pt ON pt.post_id=pm.post_id AND pt.channel_id=pm.channel_id WHERE ch.telegram_chat_id=? AND pm.telegram_message_id=? AND pm.deleted=0",
         (origin.chat.id, origin.message_id),
     )
     if saved and saved["payload_json"]:
         rendered = json.loads(saved["payload_json"])
-        if rendered.get("content_type") != "album":
+        if saved["content_json"] or rendered.get("content_type") != "album":
             reactions = {
                 r["button_id"]: r["count"]
                 for r in db.all_rows(
@@ -598,7 +739,7 @@ async def original(m, state, bot):
             else None,
             "unknown_markup": not saved and not previous and m.reply_markup is None,
             "buttons": import_buttons(markup, known),
-            "album": bool(m.media_group_id),
+            "album": bool(m.media_group_id or payload.get("album")),
         }
     )
     initial = await state.get_data()

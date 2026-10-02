@@ -20,6 +20,7 @@ from app import content as content
 from app.i18n import language_context, tr
 from services.media import VIDEO_EXTENSIONS, prepare_video, upload_metadata
 from services.progress import current_progress, write_worker_progress
+from services.worker_sandbox import worker_command
 
 TELEGRAM_DOMAINS = {
     "t.me",
@@ -714,7 +715,7 @@ def inspect_download(url, folder):
         return direct
     try:
         opts = ydl_options(folder, url)
-        opts.update(noplaylist=False, extract_flat="in_playlist")
+        opts.update(noplaylist=False, extract_flat="in_playlist", lazy_playlist=True)
         with youtube_session(opts) as ydl:
             info = ydl.extract_info(url, download=False)
         if not info:
@@ -722,6 +723,8 @@ def inspect_download(url, folder):
         if info.get("_type") in {"playlist", "multi_video"}:
             entries = []
             for entry in info.get("entries") or []:
+                if len(entries) >= 1000:
+                    raise ValueError(tr("Сайт вернул слишком много данных."))
                 if not entry:
                     continue
                 address = entry.get("webpage_url") or entry.get("url")
@@ -965,7 +968,7 @@ def download_worker_main():
 
 
 async def stop_download_worker(proc):
-    if proc.returncode is not None:
+    if proc.returncode is not None and os.name == "nt":
         return
     if os.name == "nt":
         killer = await asyncio.create_subprocess_exec(
@@ -996,22 +999,52 @@ async def run_download_worker(action, url, folder, info=None, selection=0):
         if os.name == "nt"
         else {"start_new_session": True}
     )
+    allowed = {
+        "PATH",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "HOME",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "LANG",
+        "LC_ALL",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "FFMPEG_PATH",
+        "DENO_PATH",
+        "DOWNLOAD_SOURCE_BYTES",
+        "DOWNLOAD_TOTAL_BYTES",
+    }
     env = dict(
-        os.environ,
+        {
+            key: value
+            for key, value in os.environ.items()
+            if key in allowed
+            or key in {"DOWNLOAD_WORKER_CPU_SECONDS", "DOWNLOAD_WORKER_MEMORY_BYTES"}
+        },
         DB_FILE=":memory:",
         BOT_TOKEN="",
         ADMIN_ID="0",
         PYTHONIOENCODING="utf-8",
+        DOWNLOAD_WORKER="1",
     )
+    selected_cookies = cookies_file(url)
+    if selected_cookies:
+        env["DOWNLOAD_COOKIES_FILE"] = str(selected_cookies)
+    command, working_directory = worker_command(folder, env)
     proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "app.download_worker",
+        *command,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
-        cwd=str(Path(__file__).resolve().parent.parent),
+        cwd=str(working_directory),
         **kwargs,
     )
     request = json.dumps(
@@ -1024,7 +1057,7 @@ async def run_download_worker(action, url, folder, info=None, selection=0):
             "language": language_context.get(),
         }
     ).encode()
-    task = asyncio.create_task(proc.communicate(request))
+    task = asyncio.create_task(bounded_communicate(proc, request))
     started = asyncio.get_running_loop().time()
     timeout = 180 if action == "inspect" else 3600
     try:
@@ -1071,7 +1104,36 @@ async def run_download_worker(action, url, folder, info=None, selection=0):
     finally:
         await stop_download_worker(proc)
         if not task.done():
-            await task
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def bounded_communicate(proc, request, limit=1_000_000):
+    """Enforce output limits while reading both pipes."""
+
+    async def read(stream):
+        output = bytearray()
+        while chunk := await stream.read(65536):
+            if len(output) + len(chunk) > limit:
+                raise ValueError("Download worker output exceeded its byte limit")
+            output.extend(chunk)
+        return bytes(output)
+
+    readers = [
+        asyncio.create_task(read(stream)) for stream in (proc.stdout, proc.stderr)
+    ]
+    try:
+        proc.stdin.write(request)
+        await proc.stdin.drain()
+        proc.stdin.close()
+        result = await asyncio.gather(*readers)
+        await proc.wait()
+        return result
+    finally:
+        for task in readers:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*readers, return_exceptions=True)
 
 
 def temporary_size(folder):

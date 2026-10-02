@@ -649,12 +649,21 @@ class PlanningTests(unittest.IsolatedAsyncioTestCase):
 
         proc = SimpleNamespace(communicate=communicate)
 
+        async def bounded(process, request):
+            self.assertIs(process, proc)
+            return await communicate(request)
+
         async def stop(process):
             self.assertIs(process, proc)
             stopped.set()
 
         with (
             tempfile.TemporaryDirectory() as folder,
+            patch.object(
+                downloader,
+                "bounded_communicate",
+                new=AsyncMock(side_effect=bounded),
+            ),
             patch.object(
                 asyncio, "create_subprocess_exec", new=AsyncMock(return_value=proc)
             ),

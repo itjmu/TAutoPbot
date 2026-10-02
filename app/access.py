@@ -31,7 +31,8 @@ def admin_only(c):
 
 async def owner_and_bot_ok(bot, chat_id, uid):
     try:
-        me = await bot.get_me()
+        # aiogram caches identity; lightweight adapters retain their get_me API.
+        me = await (bot.me() if callable(getattr(bot, "me", None)) else bot.get_me())
         owner = await bot.get_chat_member(chat_id, uid)
         member = await bot.get_chat_member(chat_id, me.id)
         admins = {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}

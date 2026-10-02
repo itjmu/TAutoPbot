@@ -634,7 +634,7 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
             dispatcher.start_polling.assert_awaited_once()
             self.assertEqual(events, ["jobs", "telegram"])
             self.assertIsNone(database.db)
-            self.assertEqual(scheduler.add_job.call_count, 11)
+            self.assertEqual(scheduler.add_job.call_count, 12)
             pin_job = next(
                 call
                 for call in scheduler.add_job.call_args_list

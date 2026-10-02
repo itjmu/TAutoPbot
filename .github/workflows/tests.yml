@@ -1,5 +1,11 @@
 name: Tests
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '23 4 * * 1'
+permissions:
+  contents: read
 jobs:
   regression:
     runs-on: ${{ matrix.os }}
@@ -17,3 +23,12 @@ jobs:
       - run: python -m ruff format --check bot.py config.py manage.py app services tests
       - run: python -m unittest discover -s tests -v
       - run: python -m compileall -q bot.py config.py manage.py app services tests
+  dependency-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r requirements.txt
+      - run: python tools/dependency_audit.py

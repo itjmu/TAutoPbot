@@ -19,6 +19,9 @@ log = logging.getLogger(__name__)
 class Guard(BaseMiddleware):
     async def __call__(self, handler, event, data):
         if isinstance(event, Message) and event.chat.type != "private":
+            from services.forum_topics import observe
+
+            observe(event)
             if not event.successful_payment:
                 await features_sources.ingest_telegram(event, data["bot"])
             return

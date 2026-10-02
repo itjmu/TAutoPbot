@@ -125,3 +125,11 @@ older than 90 seconds returns a nonzero exit code:
 ```sh
 sudo -u tautopbot /opt/tautopbot/.venv/bin/python /opt/tautopbot/manage.py health --database /var/lib/tautopbot/bot.db
 ```
+
+## Optional worker isolation and health details
+
+`DOWNLOAD_SANDBOX=off` preserves the existing subprocess deployment. On Linux, `DOWNLOAD_SANDBOX=required` requires bubblewrap and supported user namespaces; it fails closed if unavailable. It exposes a copied worker bundle, job directory, system runtime and explicitly selected runtime/cookie files, rather than the host project database or environment file. Networking remains available for downloads; this is not an independent egress firewall. Verify kernel and service namespace compatibility before enabling this option. No server verification was performed during the Windows checks.
+
+`DOWNLOAD_WORKER_CPU_SECONDS=1800` and `DOWNLOAD_WORKER_MEMORY_BYTES=2147483648` configure worker ceilings. Linux uses resource limits, while Windows uses Job Objects for the process family. A zero value disables the corresponding CPU/memory ceiling; negative values are rejected. Size Linux virtual-address limits for the installed runtime, including Deno. These resource limits alone do not isolate files.
+
+Add `--details` to `manage.py health` to display the saved runtime queue, latency and scheduler snapshot. Existing heartbeat exit-code behavior is preserved. The full local verification report is `SCALE_FIXES_2026-10-02.md`.

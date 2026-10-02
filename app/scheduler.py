@@ -116,12 +116,22 @@ async def notify_once(bot, uid, key, text):
 
 
 async def scheduler_rights(bot):
-    rows = database.all_rows("SELECT * FROM channels WHERE is_active=1")
-    for r in rows:
+    rows = database.all_rows(
+        "SELECT * FROM channels WHERE is_active=1 AND (rights_checked_at IS NULL OR rights_checked_at<=?) "
+        "AND (rights_retry_at IS NULL OR rights_retry_at<=?) "
+        "ORDER BY COALESCE(rights_checked_at,''),id LIMIT 32",
+        (timeutils.iso(timeutils.now() - timedelta(hours=6)), timeutils.iso()),
+    )
+
+    async def check_one(r):
         activate(r["owner_telegram_id"])
         try:
             ok = await access.owner_and_bot_ok(
                 bot, r["telegram_chat_id"], r["owner_telegram_id"]
+            )
+            database.execute(
+                "UPDATE channels SET rights_checked_at=?,rights_retry_at=NULL WHERE id=?",
+                (timeutils.iso(), r["id"]),
             )
             if not ok and r["bot_is_admin"]:
                 database.execute(
@@ -135,7 +145,19 @@ async def scheduler_rights(bot):
                     tr("⚠️ Потеряны права: ") + html.escape(r["title"]),
                 )
         except Exception:
+            database.execute(
+                "UPDATE channels SET rights_retry_at=? WHERE id=?",
+                (timeutils.iso(timeutils.now() + timedelta(minutes=1)), r["id"]),
+            )
             log.exception("Rights check failed")
+
+    slots = asyncio.Semaphore(4)
+
+    async def check(r):
+        async with slots:
+            await check_one(r)
+
+    await asyncio.gather(*(check(r) for r in rows))
 
 
 async def scheduler_premium_notifications(bot):
@@ -169,7 +191,10 @@ async def scheduler_premium_notifications(bot):
 
 async def scheduler_requests(bot):
     for approved in database.all_rows(
-        "SELECT id FROM join_requests WHERE status='approved' AND approval_notified_at IS NULL ORDER BY id LIMIT 100"
+        "SELECT id FROM join_requests WHERE status='approved' AND approval_notified_at IS NULL "
+        "AND COALESCE(approval_delivery_state,'pending')='pending' "
+        "AND (approval_retry_at IS NULL OR approval_retry_at<=?) ORDER BY id LIMIT 100",
+        (timeutils.iso(),),
     ):
         try:
             await features_conditions.notify_join_approved(approved["id"], bot)
@@ -272,10 +297,14 @@ def acquire_runtime_lock():
 
 async def heartbeat():
     if (
-        database.execute(
-            "UPDATE runtime_lock SET heartbeat=? WHERE id=1 AND owner=?",
-            (timeutils.iso(), RUN_OWNER),
-        ).rowcount
+        await database.async_call(
+            lambda conn: (
+                conn.execute(
+                    "UPDATE runtime_lock SET heartbeat=? WHERE id=1 AND owner=?",
+                    (timeutils.iso(), RUN_OWNER),
+                ).rowcount
+            )
+        )
         != 1
     ):
         raise RuntimeError(tr("Потеряна блокировка процесса."))

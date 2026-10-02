@@ -141,5 +141,15 @@
   "🖼 Обложка": "🖼 Cover",
   "❌ Отмена": "❌ Cancel",
   "🚀 Публикация": "🚀 Publish",
-  "🔒 Без копий": "🔒 No copying"
+  "🔒 Без копий": "🔒 No copying",
+  "💬 Тема: {v0} · {v1}": "💬 Topic: {v0} · {v1}",
+  "Общая": "General",
+  "В этой группе нет тем.": "This group has no topics.",
+  "Отправьте ID темы или ссылку на тему/сообщение в ней. Отправьте 0 для общей темы.": "Send the topic ID or a topic/message link containing its topic ID. Send 0 for General.",
+  "Укажите ID темы или ссылку Telegram на тему.": "Enter a topic ID or a Telegram topic link.",
+  "Ссылка относится к другой группе.": "This link belongs to another group.",
+  "➕ Указать тему": "➕ Add topic",
+  "💬 Темы группы {v0} ({v1}). Показаны сохранённые темы; недостающую можно добавить по ID или ссылке.": "💬 Topics in {v0} ({v1}). Saved topics are shown; add missing ones by ID or link.",
+  "Отправьте ID или ссылку темы. Можно добавить название: ID | Название. Отправьте 0 для общей темы.": "Send a topic ID or link. You can include its name: ID | Name. Send 0 for General.",
+  "Название темы должно содержать от 1 до 128 символов.": "The topic name must contain 1–128 characters."
 }

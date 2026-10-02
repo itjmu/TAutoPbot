@@ -67,6 +67,7 @@ async def start(message: Message, state: FSMContext, bot: Bot):
         reply_markup=ui.main_kb(),
     )
     await ui.dismiss_command(message)
+    await ui.cleanup_home(bot, uid)
 
 
 @router.message(Command("cancel"))
@@ -74,6 +75,7 @@ async def cancel(message: Message, state: FSMContext):
     await state.clear()
     await ui.answer(message, tr("❌ Отменено."), reply_markup=ui.main_kb())
     await ui.dismiss_command(message)
+    await ui.cleanup_home(message.bot, message.from_user.id)
 
 
 @router.message(Command("stopdownload", "stop_download"))
@@ -92,6 +94,7 @@ async def menu_main(c: CallbackQuery):
     if not await access.access_callback(c):
         return
     await ui.edit(c, tr("🤖 <b>Главное меню</b>\n\nВыберите раздел:"), ui.main_kb())
+    await ui.cleanup_home(c.bot, c.from_user.id)
     await c.answer()
 
 

@@ -27,6 +27,34 @@ class ContestFormTests(unittest.IsolatedAsyncioTestCase):
             answer=AsyncMock(),
         )
 
+    async def test_captcha_direct_toggle_and_additional_settings(self):
+        c = self.callback("contest:new")
+        with (
+            patch.object(ui, "edit", new=AsyncMock()) as edit,
+            patch.object(ui, "answer", new=AsyncMock()),
+            patch.object(contests, "prompt", new=AsyncMock()) as prompt,
+        ):
+            await contests.new(c, self.state)
+            c.data = f"contest:select:{self.cid}"
+            await contests.select_channel(c, self.state)
+            await contests.selected_channels(c, self.state)
+            prompt.reset_mock()
+            c.data = "contest:edit:captcha"
+            await contests.edit_field(c, self.state)
+            prompt.assert_not_awaited()
+            self.assertEqual(json.loads(db.setting("contest_draft:42"))["captcha"], 1)
+            self.assertIn("☑ 🧮", str(edit.await_args.args[2]))
+            await contests.extra(c, self.state)
+            markup = str(edit.await_args.args[2])
+            for icon in ("☑ 🧮", "📍", "❓", "👥", "🎁", "🏷"):
+                self.assertIn(icon, markup)
+            await contests.edit_field(c, self.state)
+            self.assertEqual(json.loads(db.setting("contest_draft:42"))["captcha"], 0)
+            self.assertIn("☐ 🧮", str(edit.await_args.args[2]))
+            self.assertIn("contest:edit:referrals", str(edit.await_args.args[2]))
+            await contests.draft_panel(c, self.state, True)
+            self.assertFalse((await self.state.get_data())["extra_panel"])
+
     async def test_form_saves_fields_media_task_and_resumes(self):
         c = self.callback("contest:new")
         with (

@@ -4,7 +4,8 @@ import os
 
 from dotenv import load_dotenv
 
-load_dotenv()
+if os.getenv("DOWNLOAD_WORKER") != "1":
+    load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or "0")
 DB_FILE = os.getenv("DB_FILE", "bot.db")

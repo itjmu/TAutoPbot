@@ -91,8 +91,9 @@ async def inspect_for_user(bot, uid, url):
 
 
 async def inspect_in_background(bot, uid, url):
+    notice = None
     try:
-        await bot.send_message(
+        notice = await bot.send_message(
             uid,
             tr("🔎 Проверяю ссылку в фоне. Вы можете пользоваться меню."),
             reply_markup=ui.kb(
@@ -117,20 +118,25 @@ async def inspect_in_background(bot, uid, url):
             2,
         )
         rows.append([ui.choice(tr("❌ Пропустить"), "menu:main")])
-        await bot.send_message(
+        chooser = await bot.send_message(
             uid,
             html.escape(info["title"]) + tr("\nЧто скачать?"),
             reply_markup=ui.kb(rows),
         )
+        ui.note_transient(uid, chooser)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         log.exception("Download inspection failed")
-        await bot.send_message(
+        failure = await bot.send_message(
             uid,
             tr("Не удалось проверить ссылку: ") + html.escape(str(exc)[:300]),
             reply_markup=ui.back("menu:download"),
         )
+        ui.note_transient(uid, failure)
+    finally:
+        if notice:
+            ui.note_transient(uid, notice)
 
 
 @router.callback_query(F.data == "download:status")

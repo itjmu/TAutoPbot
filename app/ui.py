@@ -16,8 +16,11 @@ from app.features import posts as features_posts
 from app.i18n import tr
 from config import ADMIN_ID
 from services.telegram_links import supports_requests
+from services.telegram_rate import background_traffic
 
 _panel_locks = WeakValueDictionary()
+_cleanup_tasks = {}
+_cleanup_slots = asyncio.Semaphore(8)
 
 
 def panel_id(uid):
@@ -72,10 +75,143 @@ def note_sent(uid, sent):
         note_message(uid, getattr(message, "message_id", None))
 
 
+def note_transient(uid, sent):
+    """Track bot navigation/status messages, never user content or download output."""
+    if database.db is None:
+        return
+    ids = json.loads(database.setting(f"ui:transient:{uid}") or "[]")
+    for message in sent if isinstance(sent, list) else [sent]:
+        mid = message if type(message) is int else getattr(message, "message_id", None)
+        if type(mid) is int and mid not in ids:
+            ids.append(mid)
+    database.execute(
+        "INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)",
+        (f"ui:transient:{uid}", json.dumps(ids)),
+    )
+    note_sent(uid, sent)
+
+
+async def cleanup_home(bot, uid, *, _pending_only=False):
+    if not _pending_only:
+        _prepare_cleanup(uid)
+    task = _cleanup_tasks.get(uid)
+    if task is None or task.done():
+        if len(_cleanup_tasks) >= 128:
+            return  # durable pending IDs are picked up by cleanup_tick
+
+        async def run():
+            token = background_traffic.set(True)
+            try:
+                async with _cleanup_slots:
+                    await _cleanup_home(bot, uid)
+            finally:
+                background_traffic.reset(token)
+
+        task = asyncio.create_task(run(), name=f"ui-cleanup:{uid}")
+        _cleanup_tasks[uid] = task
+
+        def finished(completed):
+            if _cleanup_tasks.get(uid) is completed:
+                _cleanup_tasks.pop(uid, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finished)
+    # Quick cleanup remains synchronous; Telegram delays cannot hold the menu.
+    await asyncio.wait({task}, timeout=0.15)
+    if task.done():
+        await task
+
+
+async def close_cleanup():
+    tasks = list(_cleanup_tasks.values())
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    _cleanup_tasks.clear()
+
+
+def forget_transient(uid, message_id):
+    key = f"ui:transient:{uid}"
+    ids = json.loads(database.setting(key) or "[]")
+    if message_id in ids:
+        database.execute(
+            "UPDATE app_settings SET value=? WHERE key=?",
+            (json.dumps([mid for mid in ids if mid != message_id]), key),
+        )
+
+
+def _prepare_cleanup(uid):
+    current = panel_id(uid)
+    ids = set(json.loads(database.setting(f"ui:transient:{uid}") or "[]"))
+    keys = [f"ui:transient:{uid}"]
+    for row in database.all_rows(
+        "SELECT key,value FROM app_settings WHERE key LIKE ?", (f"ui:controls:{uid}:%",)
+    ):
+        workflow = row["key"].split(":", 3)[3]
+        if workflow.startswith("post:") or workflow == "contest_preview":
+            ids.update(json.loads(row["value"]))
+            keys.append(row["key"])
+    for key in keys:
+        database.execute("DELETE FROM app_settings WHERE key=?", (key,))
+    key = f"ui:cleanup_pending:{uid}"
+    pending = set(json.loads(database.setting(key) or "[]"))
+    pending.update(mid for mid in ids if type(mid) is int and mid != current)
+    if pending:
+        database.execute(
+            "INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)",
+            (key, json.dumps(sorted(pending))),
+        )
+
+
+async def _cleanup_home(bot, uid):
+    key = f"ui:cleanup_pending:{uid}"
+    pending = set(json.loads(database.setting(key) or "[]"))
+    database.execute("DELETE FROM app_settings WHERE key=?", (key,))
+    remaining = []
+    try:
+        for mid in sorted(pending):
+            try:
+                await bot.delete_message(uid, mid)
+            except TelegramBadRequest as exc:
+                if "not found" not in str(exc).lower():
+                    await clear_controls(bot, uid, mid)
+            except TelegramAPIError:
+                remaining.append(mid)
+            pending.discard(mid)
+    finally:
+        if pending or remaining:
+            saved = set(json.loads(database.setting(key) or "[]"))
+            saved.update(pending)
+            saved.update(remaining)
+            database.execute(
+                "INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)",
+                (key, json.dumps(sorted(saved))),
+            )
+
+
+async def cleanup_tick(bot):
+    cursor = database.setting("ui:cleanup_cursor") or ""
+    rows = database.all_rows(
+        "SELECT key FROM app_settings WHERE key LIKE 'ui:cleanup_pending:%' AND key>? ORDER BY key LIMIT 16",
+        (cursor,),
+    )
+    database.execute(
+        "INSERT OR REPLACE INTO app_settings(key,value) VALUES('ui:cleanup_cursor',?)",
+        (rows[-1]["key"] if rows else "",),
+    )
+    for row in rows:
+        uid = int(row["key"].rsplit(":", 1)[1])
+        # Only completed navigation snapshots are eligible; never sweep a live preview.
+        await cleanup_home(bot, uid, _pending_only=True)
+
+
 async def retire_controls(bot, uid, workflow):
     key = f"ui:controls:{uid}:{workflow}"
     saved = database.setting(key) if database.db is not None else ""
     if saved:
+        if workflow.startswith("join:"):
+            note_transient(uid, json.loads(saved))
         for mid in json.loads(saved):
             await clear_controls(bot, uid, mid)
         database.execute("DELETE FROM app_settings WHERE key=?", (key,))
@@ -93,6 +229,8 @@ async def track_controls(bot, uid, workflow, sent):
             (f"ui:controls:{uid}:{workflow}", json.dumps(ids)),
         )
     note_sent(uid, sent)
+    if workflow.startswith("post:") or workflow == "contest_preview":
+        note_transient(uid, sent)
 
 
 async def refresh_panel(bot, uid):
@@ -182,6 +320,7 @@ async def show_panel(
         sent = await bot.send_message(uid, text, reply_markup=reply_markup, **kwargs)
         remember_panel(uid, sent.message_id)
         if previous_id and previous_id != sent.message_id:
+            note_transient(uid, previous_id)
             await clear_controls(bot, uid, previous_id)
         return sent.message_id
 
@@ -574,7 +713,8 @@ def post_controls(
 
 
 def target_markup(uid, pid):
-    selected = {r["id"] for r in features_posts.post_target_rows(pid)}
+    targets = features_posts.post_target_rows(pid)
+    selected = {r["id"] for r in targets}
     rows = button_grid(
         [
             choice(
@@ -585,6 +725,33 @@ def target_markup(uid, pid):
         ],
         2,
     )
+    for target in targets:
+        if target["chat_type"] == "supergroup" and target["is_forum"]:
+            topic = target["message_thread_id"]
+            saved_topic = (
+                database.one(
+                    "SELECT name FROM forum_topics WHERE chat_id=? AND topic_id=?",
+                    (target["telegram_chat_id"], topic),
+                )
+                if topic
+                else None
+            )
+            rows.append(
+                [
+                    choice(
+                        tr(
+                            "💬 Тема: {v0} · {v1}",
+                            v0=(saved_topic["name"] or topic)
+                            if saved_topic
+                            else topic
+                            if topic is not None
+                            else tr("Общая"),
+                            v1=target["title"][:20],
+                        ),
+                        f"p:{pid}:topic:{target['id']}",
+                    )
+                ]
+            )
     if rows:
         rows.append(
             [
@@ -603,6 +770,7 @@ def target_markup(uid, pid):
 
 
 async def send_target_picker(bot, uid, pid, *, panel=False):
+    await refresh_target_forums(bot, pid)
     text = tr(
         "📺 Куда опубликовать?\nВыберите один или несколько каналов, затем нажмите «Готово»."
     )
@@ -616,9 +784,21 @@ async def send_target_picker(bot, uid, pid, *, panel=False):
 
 async def target_picker(c, pid):
     content.mutable_post(pid, c.from_user.id)
+    await refresh_target_forums(c.bot, pid)
     await edit(
         c, tr("📺 Выберите каналы для публикации:"), target_markup(c.from_user.id, pid)
     )
+
+
+async def refresh_target_forums(bot, pid):
+    from services.forum_topics import remember_chat
+
+    for target in features_posts.post_target_rows(pid):
+        if target["chat_type"] == "supergroup":
+            try:
+                remember_chat(await bot.get_chat(target["telegram_chat_id"]))
+            except TelegramAPIError:
+                pass
 
 
 def source_card(sid, uid):

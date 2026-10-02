@@ -3,6 +3,7 @@
 import asyncio
 import html
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
@@ -35,9 +36,57 @@ from app.states import PostCreate
 router = Router(name="features.posts")
 
 
+async def topic_picker(c, state, bot, pid, cid, page=0):
+    target = database.one(
+        "SELECT c.* FROM channels c JOIN post_targets pt ON pt.channel_id=c.id WHERE pt.post_id=? AND c.id=?",
+        (pid, cid),
+    )
+    if not target or not accounts.channel_allowed(c.from_user.id, cid):
+        raise ValueError(tr("Этот канал недоступен."))
+    chat = await bot.get_chat(target["telegram_chat_id"])
+    if not getattr(chat, "is_forum", False):
+        raise ValueError(tr("В этой группе нет тем."))
+    from services import forum_topics
+
+    forum_topics.remember_chat(chat)
+    topics = forum_topics.known(chat.id)
+    page = max(0, min(page, max(0, (len(topics) - 1) // 10)))
+    rows = [[ui.choice(tr("Общая"), f"p:{pid}:topicsel:{cid}:0")]]
+    for topic in topics[page * 10 : (page + 1) * 10]:
+        if not topic["closed"]:
+            rows.append(
+                [
+                    ui.choice(
+                        (topic["name"] or str(topic["topic_id"]))[:40],
+                        f"p:{pid}:topicsel:{cid}:{topic['topic_id']}",
+                    )
+                ]
+            )
+    navigation = []
+    if page:
+        navigation.append(ui.choice("◀️", f"p:{pid}:topic:{cid}:{page - 1}"))
+    if (page + 1) * 10 < len(topics):
+        navigation.append(ui.choice("▶️", f"p:{pid}:topic:{cid}:{page + 1}"))
+    if navigation:
+        rows.append(navigation)
+    rows += [
+        [ui.choice(tr("➕ Указать тему"), f"p:{pid}:topicadd:{cid}")],
+        [ui.choice(tr("⬅️ Назад"), f"p:{pid}:targets")],
+    ]
+    await ui.edit(
+        c,
+        tr(
+            "💬 Темы группы {v0} ({v1}). Показаны сохранённые темы; недостающую можно добавить по ID или ссылке.",
+            v0=html.escape(chat.title or target["title"]),
+            v1=chat.id,
+        ),
+        ui.kb(rows),
+    )
+
+
 def post_target_rows(pid):
     return database.all_rows(
-        "SELECT c.*,pt.template_id,pt.status target_status,pt.error FROM post_targets pt JOIN channels c ON c.id=pt.channel_id WHERE pt.post_id=? ORDER BY c.id",
+        "SELECT c.*,pt.template_id,pt.message_thread_id,pt.status target_status,pt.error FROM post_targets pt JOIN channels c ON c.id=pt.channel_id WHERE pt.post_id=? ORDER BY c.id",
         (pid,),
     )
 
@@ -208,6 +257,7 @@ async def show_post(
             continue
         try:
             await bot.delete_message(uid, old)
+            ui.forget_transient(uid, old)
         except TelegramBadRequest:
             pass
 
@@ -336,6 +386,9 @@ async def post_action(c: CallbackQuery, state: FSMContext, bot: Bot):
         in {
             "edit",
             "targets",
+            "topic",
+            "topicsel",
+            "topicadd",
             "toggle",
             "links",
             "templates",
@@ -368,7 +421,48 @@ async def post_action(c: CallbackQuery, state: FSMContext, bot: Bot):
             )
         )
     if action == "targets":
+        await state.set_state(PostCreate.idle)
         await ui.target_picker(c, pid)
+    elif action in {"topic", "topicsel", "topicadd"}:
+        cid = int(parts[3])
+        target = database.one(
+            "SELECT c.* FROM channels c JOIN post_targets pt ON pt.channel_id=c.id WHERE pt.post_id=? AND c.id=?",
+            (pid, cid),
+        )
+        if not target or not accounts.channel_allowed(uid, cid):
+            raise ValueError(tr("Этот канал недоступен."))
+        chat = await bot.get_chat(target["telegram_chat_id"])
+        if not getattr(chat, "is_forum", False):
+            raise ValueError(tr("В этой группе нет тем."))
+        if action == "topic":
+            await topic_picker(
+                c, state, bot, pid, cid, int(parts[4]) if len(parts) > 4 else 0
+            )
+            await c.answer()
+            return
+        if action == "topicsel":
+            topic = parse_topic_reference(parts[4], chat)
+            if topic is not None and not database.one(
+                "SELECT 1 FROM forum_topics WHERE chat_id=? AND topic_id=? AND COALESCE(closed,0)=0",
+                (chat.id, topic),
+            ):
+                raise ValueError(tr("Укажите ID темы или ссылку Telegram на тему."))
+            database.execute(
+                "UPDATE post_targets SET message_thread_id=?,payload_json=NULL WHERE post_id=? AND channel_id=?",
+                (topic, pid, cid),
+            )
+            await ui.target_picker(c, pid)
+            await c.answer()
+            return
+        await state.update_data(post_id=pid, topic_channel_id=cid)
+        await state.set_state(PostCreate.topic)
+        await ui.edit(
+            c,
+            tr(
+                "Отправьте ID или ссылку темы. Можно добавить название: ID | Название. Отправьте 0 для общей темы."
+            ),
+            ui.kb([[ui.choice(tr("⬅️ Назад"), f"p:{pid}:targets")]]),
+        )
     elif action == "toggle":
         cid = int(parts[3])
         if not accounts.channel_allowed(uid, cid):
@@ -383,6 +477,13 @@ async def post_action(c: CallbackQuery, state: FSMContext, bot: Bot):
             database.execute(
                 "INSERT INTO post_targets(post_id,channel_id) VALUES(?,?)", (pid, cid)
             )
+            target = database.one("SELECT * FROM channels WHERE id=?", (cid,))
+            if target["chat_type"] == "supergroup":
+                chat = await bot.get_chat(target["telegram_chat_id"])
+                if getattr(chat, "is_forum", False):
+                    await topic_picker(c, state, bot, pid, cid)
+                    await c.answer()
+                    return
         await ui.target_picker(c, pid)
     elif action == "links":
         await c.answer(tr("Чужие ссылки удаляются автоматически."))
@@ -764,6 +865,63 @@ async def post_action(c: CallbackQuery, state: FSMContext, bot: Bot):
     await c.answer()
 
 
+def parse_topic_reference(value, chat):
+    value = value.strip()
+    if re.fullmatch(r"[0-9]+", value):
+        topic = int(value)
+    else:
+        match = re.fullmatch(
+            r"https?://t\.me/(?:(c)/([0-9]+)|([A-Za-z0-9_]+))/([0-9]+)(?:/([0-9]+))?(?:\?thread=([0-9]+))?/?",
+            value,
+        )
+        if not match:
+            raise ValueError(tr("Укажите ID темы или ссылку Telegram на тему."))
+        private, chat_number, username, first, _, thread = match.groups()
+        if private:
+            same_chat = int("-100" + chat_number) == chat.id
+        else:
+            same_chat = (
+                bool(chat.username) and username.lower() == chat.username.lower()
+            )
+        if not same_chat:
+            raise ValueError(tr("Ссылка относится к другой группе."))
+        topic = int(thread or first)
+    if topic > 2147483647:
+        raise ValueError(tr("Укажите ID темы или ссылку Telegram на тему."))
+    # Telegram's General topic is represented by an omitted thread parameter.
+    return None if topic in {0, 1} else topic
+
+
+@router.message(PostCreate.topic, F.text, ~F.text.startswith("/"))
+async def topic_input(m: Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    pid, cid = data["post_id"], data["topic_channel_id"]
+    content.mutable_post(pid, m.from_user.id)
+    target = database.one(
+        "SELECT c.* FROM channels c JOIN post_targets pt ON pt.channel_id=c.id WHERE pt.post_id=? AND c.id=?",
+        (pid, cid),
+    )
+    if not target or not accounts.channel_allowed(m.from_user.id, cid):
+        raise ValueError(tr("Этот канал недоступен."))
+    chat = await bot.get_chat(target["telegram_chat_id"])
+    if not getattr(chat, "is_forum", False):
+        raise ValueError(tr("В этой группе нет тем."))
+    reference, separator, name = m.text.partition("|")
+    topic = parse_topic_reference(reference, chat)
+    if separator and not 1 <= len(name.strip()) <= 128:
+        raise ValueError(tr("Название темы должно содержать от 1 до 128 символов."))
+    from services import forum_topics
+
+    forum_topics.remember_chat(chat)
+    forum_topics.remember(chat.id, topic, name.strip() if separator else None)
+    database.execute(
+        "UPDATE post_targets SET message_thread_id=?,payload_json=NULL WHERE post_id=? AND channel_id=?",
+        (topic, pid, cid),
+    )
+    await state.set_state(PostCreate.idle)
+    await ui.send_target_picker(bot, m.from_user.id, pid, panel=True)
+
+
 @router.message(PostCreate.edit_text, F.text)
 @router.message(PostCreate.edit_content, ~F.successful_payment, ~F.text.startswith("/"))
 @router.message(PostCreate.cover, ~F.successful_payment, ~F.text.startswith("/"))
@@ -1014,6 +1172,10 @@ async def execute_publish(pid, bot, automatic=False):
                 if delivery["payload_json"]
                 else content.render_payload(p, ch, ch["template_id"])
             )
+            if delivery["message_thread_id"] is not None:
+                chat = await bot.get_chat(ch["telegram_chat_id"])
+                if not getattr(chat, "is_forum", False):
+                    raise ValueError(tr("В этой группе нет тем."))
             if pin_requested:
                 from services import post_pins
 
@@ -1030,12 +1192,17 @@ async def execute_publish(pid, bot, automatic=False):
                 ch["telegram_chat_id"],
                 d,
                 content.build_published_markup(d["buttons"], pid),
+                **(
+                    {"message_thread_id": delivery["message_thread_id"]}
+                    if delivery["message_thread_id"] is not None
+                    else {}
+                ),
             )
             messages = msg if isinstance(msg, list) else [msg]
             with database.atomic():
-                for sent in messages:
+                for index, sent in enumerate(messages):
                     database.db.execute(
-                        "INSERT INTO published_messages(post_id,channel_id,telegram_message_id,delete_at,buttons_json) VALUES(?,?,?,?,?)",
+                        "INSERT INTO published_messages(post_id,channel_id,telegram_message_id,delete_at,buttons_json,content_json) VALUES(?,?,?,?,?,?)",
                         (
                             pid,
                             ch["id"],
@@ -1046,7 +1213,17 @@ async def execute_publish(pid, bot, automatic=False):
                             )
                             if p["delete_after_seconds"]
                             else None,
-                            json.dumps(d["buttons"]),
+                            json.dumps(
+                                d["buttons"]
+                                if (
+                                    d["content_type"] not in {"album", "video_note"}
+                                    or index == len(messages) - 1
+                                )
+                                else []
+                            ),
+                            json.dumps(
+                                content.delivered_payload(d, index), ensure_ascii=False
+                            ),
                         ),
                     )
                 database.db.execute(
@@ -1074,9 +1251,9 @@ async def execute_publish(pid, bot, automatic=False):
                 continue
             if isinstance(exc, content.PartialAlbumError):
                 with database.atomic():
-                    for sent in exc.messages:
+                    for index, sent in enumerate(exc.messages):
                         database.db.execute(
-                            "INSERT INTO published_messages(post_id,channel_id,telegram_message_id,delete_at,buttons_json) VALUES(?,?,?,?,?)",
+                            "INSERT INTO published_messages(post_id,channel_id,telegram_message_id,delete_at,buttons_json,content_json) VALUES(?,?,?,?,?,?)",
                             (
                                 pid,
                                 ch["id"],
@@ -1088,6 +1265,10 @@ async def execute_publish(pid, bot, automatic=False):
                                 if p["delete_after_seconds"]
                                 else None,
                                 "[]",
+                                json.dumps(
+                                    content.delivered_payload(d, index),
+                                    ensure_ascii=False,
+                                ),
                             ),
                         )
             # Network failures after send can mean Telegram accepted it. Never auto-retry those.

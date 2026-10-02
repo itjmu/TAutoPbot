@@ -221,6 +221,7 @@ def save_draft(uid, data):
 
 
 async def draft_panel(message, state, callback=False):
+    await state.update_data(extra_panel=False)
     data = await state.get_data()
     if data.get("form"):
         return await contest_form.panel(message, state, callback)
@@ -321,7 +322,15 @@ async def draft_panel(message, state, callback=False):
                 ui.choice(tr("🔗 Вид ссылок"), "contest:edit:subscription_layout"),
             ],
         )
-    rows.insert(1, [ui.choice(tr("🧮 Математическая капча"), "contest:edit:captcha")])
+    rows.insert(
+        1,
+        [
+            ui.choice(
+                ("☑ " if data.get("captcha") else "☐ ") + tr("🧮 Математическая капча"),
+                "contest:edit:captcha",
+            )
+        ],
+    )
     if callback:
         await ui.edit(message, text, ui.kb(rows))
     else:
@@ -369,6 +378,17 @@ async def edit_field(c, state):
         )
     if not data.get("quick") or field not in PROMPTS:
         raise ValueError(tr("Этот шаг устарел. Откройте настройку заново."))
+    if field == "captcha":
+        data["captcha"] = 0 if data.get("captcha") else 1
+        await state.set_data(data)
+        save_draft(c.from_user.id, data)
+        if data.get("extra_panel"):
+            await extra(c, state)
+        else:
+            await draft_panel(c, state, True)
+            await c.answer()
+        return
+    await state.update_data(extra_panel=False)
     await prompt(c.message, state, field)
     await c.answer()
 
@@ -403,6 +423,7 @@ async def extra(c, state):
     data = await state.get_data()
     if not data.get("quick"):
         raise ValueError(tr("Сначала заполните настройки конкурса."))
+    await state.update_data(extra_panel=True)
     await ui.edit(
         c,
         tr(
@@ -410,20 +431,36 @@ async def extra(c, state):
         ),
         ui.kb(
             [
-                [ui.choice(tr("Проверка на бота"), "contest:edit:captcha")],
                 [
                     ui.choice(
-                        tr("Куда приглашать друзей"), "contest:edit:referral_target"
+                        ("☑ " if data.get("captcha") else "☐ ") + tr("🧮 Капча"),
+                        "contest:edit:captcha",
                     )
                 ],
-                [ui.choice(tr("Вопрос участникам"), "contest:edit:quiz")],
                 [
                     ui.choice(
-                        tr("Обязательное приглашение друзей"), "contest:edit:referrals"
+                        "📍 " + tr("Куда приглашать друзей"),
+                        "contest:edit:referral_target",
                     )
                 ],
-                [ui.choice(tr("Инструкция победителю"), "contest:edit:prize")],
-                [ui.choice(tr("Название для списка"), "contest:edit:title")],
+                [
+                    ui.choice(
+                        ("☑ " if data.get("quiz") else "☐ ")
+                        + "❓ "
+                        + tr("Вопрос участникам"),
+                        "contest:edit:quiz",
+                    )
+                ],
+                [
+                    ui.choice(
+                        "👥 "
+                        + tr("Обязательное приглашение друзей")
+                        + f" · {data.get('referrals', 0)}",
+                        "contest:edit:referrals",
+                    )
+                ],
+                [ui.choice("🎁 " + tr("Инструкция победителю"), "contest:edit:prize")],
+                [ui.choice("🏷 " + tr("Название для списка"), "contest:edit:title")],
                 [ui.choice(tr("⬅️ К настройкам розыгрыша"), "contest:panel")],
             ]
         ),

@@ -5,17 +5,18 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.fsm.storage.memory import SimpleEventIsolation
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app import database as database
 from app import scheduler as scheduled_jobs
 from app import storage as storage
+from app import ui
 from app.features import sources as features_sources
 from app.i18n import tr
 from app.routing import build_router
 from config import BOT_TOKEN, DB_FILE, validate_config
 from services import broadcasts, contests
+from services.event_isolation import EventIsolation
 from services.jobs import download_jobs
 from services.runtime import RuntimeTasks
 from services.telegram_rate import TelegramRateLimit
@@ -52,11 +53,11 @@ async def run_application():
         "UPDATE downloads SET status='failed',error='Перезапуск бота; выберите формат ещё раз' WHERE status='running'"
     )
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    bot.session.middleware(TelegramRateLimit())
+    limiter = TelegramRateLimit()
+    bot.session.middleware(limiter)
     running = RuntimeTasks()
-    dp = Dispatcher(
-        storage=storage.SQLiteStorage(), events_isolation=SimpleEventIsolation()
-    )
+    running.limiter = limiter
+    dp = Dispatcher(storage=storage.SQLiteStorage(), events_isolation=EventIsolation())
     dp.include_router(build_router())
     dp.update.outer_middleware(running)
     scheduler = AsyncIOScheduler(timezone="UTC")
@@ -66,10 +67,11 @@ async def run_application():
         (contests.closing_tick, 2),
         (broadcasts.tick, 2),
         (features_sources.flush_albums, 2),
+        (ui.cleanup_tick, 5),
         (scheduled_jobs.scheduler_delete, 30),
         (scheduled_jobs.scheduler_pins, 10),
-        (scheduled_jobs.scheduler_requests, 300),
-        (scheduled_jobs.scheduler_rights, 21600),
+        (scheduled_jobs.scheduler_requests, 15),
+        (scheduled_jobs.scheduler_rights, 10),
         (scheduled_jobs.scheduler_premium_notifications, 1800),
     ]:
         scheduler.add_job(
@@ -81,7 +83,12 @@ async def run_application():
             coalesce=True,
         )
     scheduler.add_job(
-        scheduled_jobs.heartbeat, "interval", seconds=20, max_instances=1, coalesce=True
+        running.health,
+        "interval",
+        seconds=20,
+        args=[scheduled_jobs.heartbeat],
+        max_instances=1,
+        coalesce=True,
     )
     try:
         me = await bot.get_me()
@@ -101,6 +108,7 @@ async def run_application():
             scheduler.shutdown(wait=False)
         await contests.close_workers()
         await download_jobs.close()
+        await ui.close_cleanup()
         await dp.storage.close()
         await bot.session.close()
         database.execute(

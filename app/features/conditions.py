@@ -3,6 +3,7 @@
 import html
 import json
 import secrets
+from datetime import timedelta
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
@@ -272,6 +273,10 @@ async def notify_join_approved(rid, bot):
     )
     if not r:
         return
+    database.execute(
+        "UPDATE join_requests SET approval_retry_at=? WHERE id=?",
+        (timeutils.iso(timeutils.now() + timedelta(minutes=5)), rid),
+    )
     activate(r["telegram_user_id"])
     url = "https://t.me/" + r["username"] if r["username"] else r["invite_link"]
     markup = (
@@ -298,6 +303,11 @@ async def notify_join_approved(rid, bot):
             (timeutils.iso(), rid),
         )
         return
+
+    database.execute(
+        "UPDATE join_requests SET approval_delivery_state='undeliverable' WHERE id=?",
+        (rid,),
+    )
 
 
 @router.chat_join_request()

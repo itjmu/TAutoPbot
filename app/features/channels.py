@@ -1,7 +1,9 @@
 """features / channels components."""
 
+import asyncio
 import html
 from datetime import timedelta
+from weakref import WeakValueDictionary
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatMemberStatus
@@ -30,6 +32,30 @@ from app.states import AddChannel
 from services.telegram_links import chat_reference, supports_requests
 
 router = Router(name="features.channels")
+_connection_locks = WeakValueDictionary()
+
+
+async def connection_notice(bot, uid, chat, answer=None):
+    key = (id(database.db), uid, chat.id)
+    lock = _connection_locks.get(key)
+    if lock is None:
+        lock = _connection_locks[key] = asyncio.Lock()
+    async with lock:
+        setting = f"channel_notice:{uid}:{chat.id}"
+        previous = timeutils.parse_dt(database.setting(setting))
+        if previous and timeutils.now() - previous < timedelta(seconds=15):
+            return
+        text = "✅ " + html.escape(chat.title or tr("Объект")) + tr(" подключён.")
+        sent = (
+            await answer(text, reply_markup=ReplyKeyboardRemove())
+            if answer
+            else await bot.send_message(uid, text, reply_markup=ReplyKeyboardRemove())
+        )
+        database.execute(
+            "INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)",
+            (setting, timeutils.iso()),
+        )
+        ui.note_transient(uid, sent)
 
 
 @router.callback_query(F.data == "menu:channels")
@@ -106,6 +132,7 @@ async def channel_add(c: CallbackQuery, state: FSMContext, bot: Bot):
         ),
     )
     ui.note_sent(c.from_user.id, sent)
+    ui.note_transient(c.from_user.id, sent)
     await c.answer()
 
 
@@ -129,10 +156,7 @@ async def connect_channel(message, state, bot, chat):
     database.execute("DELETE FROM app_settings WHERE key=?", (f"channel_setup:{uid}",))
     await state.clear()
     await accounts.check_referral(uid, bot)
-    await message.answer(
-        "✅ " + html.escape(chat.title or tr("Объект")) + tr(" подключён."),
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    await connection_notice(bot, uid, chat, message.answer)
     await ui.answer(
         message,
         tr("📺 <b>Мои каналы/группы</b>"),
@@ -171,6 +195,28 @@ async def register_channel(uid, bot, chat):
             )
         )
     full = await bot.get_chat(chat.id)
+    # All final policy checks follow remote awaits. No await is allowed between
+    # these checks and the insert, so concurrent updates cannot bypass quotas.
+    existing = database.one(
+        "SELECT is_active FROM channels WHERE telegram_chat_id=? AND owner_telegram_id=?",
+        (chat.id, uid),
+    )
+    limit = accounts.channel_limit(uid)
+    if (
+        limit >= 0
+        and (not existing or not existing["is_active"])
+        and accounts.channel_count(uid) >= limit
+    ):
+        raise ValueError(tr("Лимит каналов/групп достигнут."))
+    if database.one(
+        "SELECT 1 FROM channels WHERE telegram_chat_id=? AND owner_telegram_id!=? AND is_active=1",
+        (chat.id, uid),
+    ):
+        raise ValueError(
+            tr(
+                "Канал уже подключён другим администратором бота. Сначала отключите прежнее подключение."
+            )
+        )
     t = timeutils.iso()
     database.execute(
         "INSERT INTO channels(telegram_chat_id,title,username,chat_type,owner_telegram_id,bot_is_admin,is_active,created_at,updated_at,invite_link) VALUES(?,?,?,?,?,1,1,?,?,?) ON CONFLICT(telegram_chat_id,owner_telegram_id) DO UPDATE SET title=excluded.title,username=excluded.username,invite_link=excluded.invite_link,bot_is_admin=1,is_active=1,updated_at=excluded.updated_at",
@@ -185,6 +231,9 @@ async def register_channel(uid, bot, chat):
             getattr(full, "invite_link", None),
         ),
     )
+    from services.forum_topics import remember_chat
+
+    remember_chat(full)
 
 
 @router.my_chat_member()
@@ -210,11 +259,7 @@ async def channel_bot_added(event: ChatMemberUpdated, bot: Bot, dispatcher: Disp
     if await private_state.get_state() == AddChannel.waiting.state:
         await private_state.clear()
     await accounts.check_referral(uid, bot)
-    await bot.send_message(
-        uid,
-        "✅ " + html.escape(event.chat.title or tr("Канал")) + tr(" подключён."),
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    await connection_notice(bot, uid, event.chat)
     await ui.show_panel(
         bot,
         uid,
@@ -292,6 +337,9 @@ async def channel_check(c: CallbackQuery, bot: Bot):
     r = template_channel(cid, c.from_user.id)
     ok = await access.owner_and_bot_ok(bot, r["telegram_chat_id"], c.from_user.id)
     full = await bot.get_chat(r["telegram_chat_id"])
+    from services.forum_topics import remember_chat
+
+    remember_chat(full)
     database.execute(
         "UPDATE channels SET bot_is_admin=?,title=?,username=?,chat_type=?,updated_at=? WHERE id=?",
         (int(ok), full.title, full.username, full.type, timeutils.iso(), cid),

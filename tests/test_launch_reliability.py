@@ -266,7 +266,10 @@ class LaunchReliabilityTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(TelegramRetryAfter):
                 await draws.finish(self.bot, draws.get(cid))
         self.assertEqual(calls.count(1000), 1)
-        self.assertNotIn(1051, calls)
+        # Bounded concurrent checks finish their current batch before retry.
+        self.assertEqual(calls.count(1051), 1)
+        self.assertEqual(calls.count(1050), 2)
+        self.assertNotIn(1056, calls)
         self.assertEqual(draws.get(cid)["status"], "closing")
         self.bot.get_chat_member.side_effect = None
         self.bot.get_chat_member.return_value = SimpleNamespace(status="member")
