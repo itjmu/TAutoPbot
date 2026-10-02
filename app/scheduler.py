@@ -97,6 +97,12 @@ async def scheduler_delete(bot):
         )
 
 
+async def scheduler_pins(bot):
+    from services import post_pins
+
+    await post_pins.process(bot)
+
+
 async def notify_once(bot, uid, key, text):
     if database.one("SELECT 1 FROM notification_keys WHERE key=?", (key,)):
         return

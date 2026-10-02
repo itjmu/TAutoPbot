@@ -1,5 +1,7 @@
 # TAutoPbot — архитектура и передача контекста новому чату
 
+> Historical snapshot. Read `FINAL_PROJECT_HANDOFF.md` (30 September 2026) and `AGENTS.md` for the current baseline and working rules. The former Russian-only response preference and old pending tasks below are superseded. Reply briefly in English; preserve existing features and implement requested fixes, improvements and additions. Do not replay historical maintenance actions.
+
 Дата передачи: **23 сентября 2026**. Версия проекта: **4.0.0**.
 Это описание уже существующего проекта, решений пользователя и текущего состояния. Не инструкция переписать приложение заново.
 

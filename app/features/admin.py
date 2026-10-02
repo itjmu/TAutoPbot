@@ -232,6 +232,7 @@ async def broadcast_send(m: Message, state: FSMContext, bot: Bot):
             "chat_id": m.chat.id,
             "ids": [],
             "group": m.media_group_id,
+            "forward": bool(m.forward_origin),
         }
     if m.message_id not in draft["ids"]:
         draft["ids"].append(m.message_id)

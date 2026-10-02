@@ -40,6 +40,61 @@ def limits(uid):
     return (20, 60) if accounts.has_premium(uid) else (10, 30)
 
 
+def remember_batch_id():
+    """Keep stale callback IDs from ever referring to a new series."""
+    row = database.one("SELECT value FROM app_settings WHERE key='multipost_last_id'")
+    latest = database.one("SELECT COALESCE(MAX(id),0) AS id FROM multipost_batches")[
+        "id"
+    ]
+    latest = max(latest, int(row["value"]) if row else 0)
+    database.db.execute(
+        "INSERT OR REPLACE INTO app_settings(key,value) VALUES('multipost_last_id',?)",
+        (str(latest),),
+    )
+    return latest
+
+
+def cancel_batch(bid, uid):
+    with database.atomic():
+        owned(bid, uid)
+        remember_batch_id()
+        for item in items(bid):
+            pid = item["post_id"]
+            database.db.execute(
+                "UPDATE scheduled_posts SET active=0 WHERE post_id=?", (pid,)
+            )
+            # Keep delivery records needed by live reactions, expiry and uncertain sends.
+            safe = item["status"] in {
+                "draft",
+                "scheduled",
+                "skipped",
+                "failed",
+            } and not database.one(
+                "SELECT 1 FROM published_messages WHERE post_id=? UNION ALL SELECT 1 FROM post_targets WHERE post_id=? AND status IN ('sent','sending','uncertain')",
+                (pid, pid),
+            )
+            if safe:
+                for table in ("scheduled_posts", "post_targets", "post_reactions"):
+                    database.db.execute(f"DELETE FROM {table} WHERE post_id=?", (pid,))
+                database.db.execute("DELETE FROM posts WHERE id=?", (pid,))
+            else:
+                database.db.execute(
+                    "UPDATE posts SET status='skipped' WHERE id=? AND status IN ('draft','scheduled')",
+                    (pid,),
+                )
+        database.db.execute("DELETE FROM multipost_albums WHERE batch_id=?", (bid,))
+        database.db.execute("DELETE FROM multipost_items WHERE batch_id=?", (bid,))
+        database.db.execute("DELETE FROM multipost_batches WHERE id=?", (bid,))
+
+
+def cleanup_cancelled(uid):
+    for row in database.all_rows(
+        "SELECT id FROM multipost_batches WHERE owner_id=? AND status='cancelled'",
+        (uid,),
+    ):
+        cancel_batch(row["id"], uid)
+
+
 def intake_buttons(bid):
     return ui.kb(
         [
@@ -53,28 +108,7 @@ def intake_buttons(bid):
 @router.callback_query(F.data == "menu:multi")
 async def menu(c, state):
     await state.clear()
-    rows = [[ui.choice(tr("➕ Новая серия"), "multi:new")]]
-    for row in database.all_rows(
-        "SELECT * FROM multipost_batches WHERE owner_id=? ORDER BY id DESC LIMIT 30",
-        (c.from_user.id,),
-    ):
-        rows.append(
-            [
-                ui.choice(
-                    f"#{row['id']} · {len(items(row['id']))} · {STATUS[row['status']]}",
-                    f"multi:{row['id']}:open",
-                )
-            ]
-        )
-    rows.append([ui.choice(tr("Главное меню"), "menu:main")])
-    await ui.edit(
-        c,
-        tr(
-            "📚 Мультипостинг\nВыберите канал или группу, отправьте готовые посты и настройте интервал. Free: 10 постов / 30 дней. Premium: 20 постов / 60 дней."
-        ),
-        ui.kb(rows),
-    )
-    await c.answer()
+    await posts.menu_posts(c)
 
 
 @router.callback_query(F.data == "multi:new")
@@ -100,10 +134,12 @@ async def target(c, state):
     uid = c.from_user.id
     if not accounts.channel_allowed(uid, cid):
         raise ValueError(tr("Канал недоступен."))
-    bid = database.execute(
-        "INSERT INTO multipost_batches(owner_id,channel_id,created_at) VALUES(?,?,?)",
-        (uid, cid, timeutils.iso()),
-    ).lastrowid
+    with database.atomic():
+        bid = remember_batch_id() + 1
+        database.db.execute(
+            "INSERT INTO multipost_batches(id,owner_id,channel_id,created_at) VALUES(?,?,?,?)",
+            (bid, uid, cid, timeutils.iso()),
+        )
     await state.set_state(MultiInput.posts)
     await state.set_data({"batch_id": bid})
     await ui.edit(
@@ -261,18 +297,7 @@ async def action(c, state):
     uid = c.from_user.id
     batch = owned(bid, uid)
     if op == "cancel":
-        with database.atomic():
-            database.db.execute(
-                "UPDATE multipost_batches SET status='cancelled' WHERE id=?", (bid,)
-            )
-            database.db.execute(
-                "UPDATE scheduled_posts SET active=0 WHERE post_id IN (SELECT post_id FROM multipost_items WHERE batch_id=?)",
-                (bid,),
-            )
-            database.db.execute(
-                "UPDATE posts SET status='skipped' WHERE id IN (SELECT post_id FROM multipost_items WHERE batch_id=?) AND status IN ('draft','scheduled')",
-                (bid,),
-            )
+        cancel_batch(bid, uid)
         await state.clear()
         await ui.edit(
             c,
@@ -290,7 +315,7 @@ async def action(c, state):
             ui.kb(
                 [
                     [ui.choice(tr("Отменить оставшиеся"), f"multi:{bid}:cancel")],
-                    [ui.choice(tr("Назад"), "menu:multi")],
+                    [ui.choice(tr("Назад"), "post:scheduled")],
                 ]
             ),
         )
@@ -397,7 +422,7 @@ async def action(c, state):
             await ui.edit(
                 c,
                 tr("✅ Серия запланирована. Бот отправит посты автоматически."),
-                ui.back("menu:multi"),
+                ui.back("post:scheduled"),
             )
     await c.answer()
 

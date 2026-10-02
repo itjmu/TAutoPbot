@@ -143,15 +143,15 @@ class NavigationFlowTests(unittest.IsolatedAsyncioTestCase):
             content,
             "send_content",
             new=AsyncMock(return_value=self.message(900, "Preview", authored=True)),
-        ):
+        ) as send:
             await posts.show_post(self.bot, 42, pid)
         self.assertEqual([m.message_id for m in self.calls("deleteMessage")], [600])
         self.assertEqual(ui.panel_id(42), 701)
         self.assertEqual(
-            [m.message_id for m in self.calls("editMessageReplyMarkup")], [900, 701]
+            [m.message_id for m in self.calls("editMessageReplyMarkup")], [701]
         )
         self.assertEqual(len(self.calls("sendMessage")), 1)
-        controls = self.calls("editMessageReplyMarkup")[0].reply_markup
+        controls = send.await_args.args[3]
         self.assertTrue(all(1 <= len(row) <= 3 for row in controls.inline_keyboard))
         actions = {b.callback_data for row in controls.inline_keyboard for b in row}
         self.assertNotIn(f"p:{pid}:edit", actions)

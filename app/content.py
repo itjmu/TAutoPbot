@@ -273,8 +273,8 @@ def parse_button(raw, typ, default_row=1):
     if not parts[0] or len(parts[0]) > 50:
         raise ValueError(tr("Название кнопки: 1–50 символов."))
     row = int(parts[-1]) if len(parts) == required + 1 else default_row
-    if not 1 <= row <= 20:
-        raise ValueError(tr("Строка: от 1 до 20."))
+    if not 1 <= row <= 100:
+        raise ValueError("Строка: от 1 до 100.")
     b = {"id": secrets.token_hex(4), "type": typ, "text": parts[0], "row": row}
     if typ == "url":
         if not valid_url(parts[1]):
@@ -296,8 +296,10 @@ def parse_button(raw, typ, default_row=1):
 
 
 def validate_buttons(buttons):
-    if len(buttons) > 20:
-        raise ValueError(tr("Максимум 20 кнопок."))
+    if any(type(b.get("row")) is not int or b["row"] < 1 for b in buttons):
+        raise ValueError("Номер строки должен быть положительным целым числом.")
+    if len(buttons) > 100:
+        raise ValueError("Telegram допускает максимум 100 кнопок в клавиатуре.")
     if any(
         b.get("style") not in {None, "primary", "success", "danger"} for b in buttons
     ):
@@ -312,7 +314,15 @@ def message_payload(m):
     fid = None
     if m.media_group_id:
         pass  # Each album item is retained as its own editable draft.
-    for kind in ("photo", "animation", "video", "document", "audio", "voice"):
+    for kind in (
+        "photo",
+        "animation",
+        "video",
+        "video_note",
+        "document",
+        "audio",
+        "voice",
+    ):
         obj = getattr(m, kind, None)
         if obj:
             typ = kind
@@ -320,7 +330,7 @@ def message_payload(m):
             break
     if typ == "text" and m.text is None:
         raise ValueError(
-            tr("Поддерживаются текст, фото, видео, GIF, документ, аудио и voice.")
+            tr("Поддерживаются текст, фото, видео, кружок, GIF, документ, аудио и voice.")
         )
     buttons = []
     if m.reply_markup:
@@ -506,6 +516,7 @@ class PartialAlbumError(Exception):
 async def send_content(bot, chat_id, d, reply_markup=None):
     typ = d["content_type"]
     text = d.get("text") or ""
+    protection = {"protect_content": True} if d.get("protect_content") else {}
     if typ == "album":
         classes = {
             "photo": InputMediaPhoto,
@@ -530,7 +541,7 @@ async def send_content(bot, chat_id, d, reply_markup=None):
             )
             for item in items
         ]
-        messages = await bot.send_media_group(chat_id, media)
+        messages = await bot.send_media_group(chat_id, media, **protection)
         if reply_markup:
             try:
                 messages.append(
@@ -539,6 +550,7 @@ async def send_content(bot, chat_id, d, reply_markup=None):
                         tr("Кнопки к публикации ↑"),
                         reply_markup=reply_markup,
                         parse_mode=None,
+                        **protection,
                     )
                 )
             except Exception as exc:
@@ -552,7 +564,30 @@ async def send_content(bot, chat_id, d, reply_markup=None):
             parse_mode=None,
             reply_markup=reply_markup,
             link_preview_options=LinkPreviewOptions(is_disabled=True),
+            **protection,
         )
+    if typ == "video_note":
+        note = await bot.send_video_note(
+            chat_id,
+            d["file_id"],
+            reply_markup=None if text else reply_markup,
+            **protection,
+        )
+        if not text:
+            return note
+        try:
+            description = await bot.send_message(
+                chat_id,
+                text,
+                entities=entity_list(d.get("caption_entities_json")) or None,
+                parse_mode=None,
+                reply_markup=reply_markup,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+                **protection,
+            )
+        except Exception as exc:
+            raise PartialAlbumError([note], exc) from exc
+        return [note, description]
     if typ not in {"photo", "video", "animation", "document", "audio", "voice"}:
         raise ValueError(tr("Старый copy-пост: перешлите оригинал боту заново."))
     return await getattr(bot, "send_" + typ)(
@@ -562,6 +597,7 @@ async def send_content(bot, chat_id, d, reply_markup=None):
         caption_entities=entity_list(d.get("caption_entities_json")) or None,
         parse_mode=None,
         reply_markup=reply_markup,
+        **protection,
         **({"cover": d.get("cover_file_id")} if typ == "video" else {}),
     )
 

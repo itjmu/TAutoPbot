@@ -458,6 +458,8 @@ def readable_rows(rows, decorate=True):
 
 def kb(rows, *, published=False):
     rows = list(rows)
+    if published:
+        return InlineKeyboardMarkup(inline_keyboard=rows)
     compact = not published and sum(len(row) for row in rows) > 3
     # Compact long object lists without changing the user's published button rows.
     out = []
@@ -499,11 +501,11 @@ def main_kb():
     return kb(
         [
             [
-                choice(tr("📢 Автопостинг"), "menu:posts"),
+                choice(tr("➕ Создать пост"), "post:create"),
                 choice(tr("📥 АвтоЗаявки"), "menu:requests"),
             ],
             [
-                choice(tr("📚 Мультипостинг"), "menu:multi"),
+                choice(tr("📢 Автопостинг"), "menu:posts"),
                 choice(tr("🔐 Условия"), "menu:conditions"),
             ],
             [
@@ -518,7 +520,9 @@ def main_kb():
     )
 
 
-def post_controls(pid, status="draft", *, has_video=False):
+def post_controls(
+    pid, status="draft", *, has_video=False, protect_content=False, pin_enabled=False
+):
     if status == "uncertain":
         return kb(
             [
@@ -537,26 +541,35 @@ def post_controls(pid, status="draft", *, has_video=False):
         )
     editing = [
         choice(tr("📝 Описание"), f"p:{pid}:text"),
-        choice(tr("🖼 Заменить сообщение"), f"p:{pid}:replace"),
-        choice(tr("🔘 Кнопки"), f"p:{pid}:buttons"),
+        choice(tr("🔄 Заменить"), f"p:{pid}:replace"),
     ]
     if has_video:
-        editing.append(choice(tr("🖼 Обложка видео"), f"p:{pid}:cover"))
-    return kb(
+        editing.append(choice(tr("🖼 Обложка"), f"p:{pid}:cover"))
+    rows = [
+        editing,
         [
-            editing,
-            [
-                choice(tr("📺 Каналы"), f"p:{pid}:targets"),
-                choice(tr("🧩 Шаблон"), f"p:{pid}:templates"),
-                choice(tr("🕐 Время"), f"p:{pid}:time"),
-                choice(tr("🗑 Автоудаление"), f"p:{pid}:delete"),
-            ],
-            [
-                choice(tr("🚀 Опубликовать"), f"p:{pid}:publish"),
-                choice(tr("❌ Пропустить"), f"p:{pid}:skip"),
-                choice(tr("⬅️ Автопостинг"), "menu:posts"),
-            ],
-        ]
+            choice(tr("📺 Каналы"), f"p:{pid}:targets"),
+            choice(tr("🧩 Шаблон"), f"p:{pid}:templates"),
+            choice(tr("🔘 Кнопки"), f"p:{pid}:buttons"),
+        ],
+        [
+            choice(tr("🕐 Время"), f"p:{pid}:time"),
+            choice(
+                ("☑ " if pin_enabled else "☐ ") + tr("📌 Закрепить"), f"p:{pid}:pin"
+            ),
+            choice(tr("🗑 Автоудаление"), f"p:{pid}:delete"),
+        ],
+        [
+            choice(tr("❌ Отмена"), f"p:{pid}:skip"),
+            choice(
+                ("☑ " if protect_content else "☐ ") + tr("🔒 Без копий"),
+                f"p:{pid}:protect",
+            ),
+            choice(tr("🚀 Публикация"), f"p:{pid}:publish"),
+        ],
+    ]
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[button_style(button) for button in row] for row in rows]
     )
 
 

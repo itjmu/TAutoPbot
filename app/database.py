@@ -139,6 +139,7 @@ def init_db():
       UNIQUE(post_id, channel_id, telegram_message_id, button_id, user_id)
     );
     CREATE INDEX IF NOT EXISTS idx_post_reactions_count ON post_reactions(post_id, channel_id, telegram_message_id, button_id);
+    CREATE INDEX IF NOT EXISTS idx_post_reactions_user ON post_reactions(post_id, channel_id, telegram_message_id, user_id);
     CREATE TABLE IF NOT EXISTS payments(
       id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER NOT NULL, days INTEGER NOT NULL,
       amount INTEGER NOT NULL, currency TEXT NOT NULL, payload TEXT UNIQUE NOT NULL,
@@ -264,6 +265,9 @@ def init_extensions():
             "delete_after_seconds INTEGER DEFAULT 0",
             "preview_ids TEXT",
             "preview_target INTEGER",
+            "protect_content INTEGER DEFAULT 0",
+            "pin_enabled INTEGER DEFAULT 0",
+            "pin_until TEXT",
         ],
         "post_targets": [
             "retry_at TEXT",
@@ -272,7 +276,14 @@ def init_extensions():
             "template_id INTEGER",
             "payload_json TEXT",
         ],
-        "published_messages": ["buttons_json TEXT DEFAULT '[]'", "delete_error TEXT"],
+        "published_messages": [
+            "buttons_json TEXT DEFAULT '[]'",
+            "delete_error TEXT",
+            "pin_state TEXT",
+            "unpin_at TEXT",
+            "pin_retry_at TEXT",
+            "pin_error TEXT",
+        ],
         "post_sources": [
             "kind TEXT DEFAULT 'telegram'",
             "url TEXT",
@@ -313,6 +324,7 @@ def init_extensions():
     CREATE TABLE IF NOT EXISTS album_intake(owner_id INTEGER,chat_id INTEGER,group_id TEXT,source_id INTEGER DEFAULT 0,items_json TEXT,targets_json TEXT,ready_at TEXT,post_id INTEGER,PRIMARY KEY(owner_id,chat_id,group_id,source_id));
     CREATE INDEX IF NOT EXISTS idx_source_seen_post ON source_seen(post_id);
     CREATE INDEX IF NOT EXISTS idx_post_owner_status ON posts(owner_telegram_id,status);
+    CREATE INDEX IF NOT EXISTS idx_published_pin ON published_messages(pin_state,deleted,unpin_at);
     """)
     for key, value in {
         "ref_inviter_days": "0",
@@ -336,6 +348,12 @@ def init_extensions():
 
 
 def init_delivery_queues():
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS edited_reactions(owner_id INTEGER, session_id INTEGER, button_id TEXT, user_id INTEGER, PRIMARY KEY(owner_id,session_id,button_id,user_id))"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_edited_reactions_user ON edited_reactions(owner_id,session_id,user_id)"
+    )
     for table, fields in {
         "contests": ["retry_at TEXT"],
         "contest_outbox": ["retry_at TEXT"],

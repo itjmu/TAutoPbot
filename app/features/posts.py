@@ -1,5 +1,6 @@
 """features / posts components."""
 
+import asyncio
 import html
 import json
 from datetime import datetime, timedelta, timezone
@@ -12,7 +13,12 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
 )
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from app import access as access
 from app import accounts as accounts
@@ -23,7 +29,7 @@ from app import timeutils as timeutils
 from app import ui as ui
 from app.features import editors as features_editors
 from app.features import sources as features_sources
-from app.i18n import activate, tr
+from app.i18n import STATUS, activate, tr
 from app.states import PostCreate
 
 router = Router(name="features.posts")
@@ -36,15 +42,27 @@ def post_target_rows(pid):
     )
 
 
-async def show_post(bot, uid, pid, with_preview=True, *, panel=True):
+async def show_post(
+    bot,
+    uid,
+    pid,
+    with_preview=True,
+    *,
+    panel=True,
+    button_editor=False,
+    reuse_preview=False,
+):
     activate(uid)
     p = content.post_owned(pid, uid)
     targets = post_target_rows(pid)
     ids = []
     preview_ready = False
+    separate_controls = False
     controls = ui.post_controls(
         pid,
         p["status"],
+        protect_content=bool(p["protect_content"]),
+        pin_enabled=bool(p["pin_enabled"]),
         has_video=(
             p["content_type"] == "video"
             or (
@@ -65,27 +83,65 @@ async def show_post(bot, uid, pid, with_preview=True, *, panel=True):
             payload = content.render_payload(p, target, target["template_id"])
         else:
             payload = content.render_payload(p, {"id": 0, "default_template_id": None})
+        old_ids = content.entity_list(p["preview_ids"])
+        payload["protect_content"] = False
+        if reuse_preview and old_ids:
+            preview = content.build_published_markup(
+                payload["buttons"], pid, preview=True
+            )
+            markup = (
+                features_editors.button_canvas(uid, "p", pid, payload["buttons"])
+                if button_editor
+                else ui.kb(
+                    (preview.inline_keyboard if preview else [])
+                    + controls.inline_keyboard,
+                    published=True,
+                )
+            )
+            if sum(map(len, markup.inline_keyboard)) <= 100:
+                try:
+                    await bot.edit_message_reply_markup(
+                        chat_id=uid, message_id=old_ids[-1], reply_markup=markup
+                    )
+                    return
+                except TelegramBadRequest as exc:
+                    if "message is not modified" in str(exc).lower():
+                        return
+                    if "message to edit not found" not in str(exc).lower():
+                        raise
         try:
+            preview_buttons = content.build_published_markup(
+                payload["buttons"], pid, preview=True
+            )
+            if button_editor:
+                markup = features_editors.button_canvas(
+                    uid, "p", pid, payload["buttons"]
+                )
+            else:
+                markup = ui.kb(
+                    (preview_buttons.inline_keyboard if preview_buttons else [])
+                    + controls.inline_keyboard,
+                    published=True,
+                )
+                if sum(len(row) for row in markup.inline_keyboard) > 100:
+                    markup = preview_buttons
+                    separate_controls = True
+            album = payload["content_type"] == "album"
             m = await content.send_content(
                 bot,
                 uid,
                 payload,
-                None,
+                None if album else markup,
             )
             ids.extend(x.message_id for x in (m if isinstance(m, list) else [m]))
             for mid in ids:
                 ui.note_message(uid, mid)
-            preview_buttons = content.build_published_markup(
-                payload["buttons"], pid, preview=True
-            )
-            await bot.edit_message_reply_markup(
-                chat_id=uid,
-                message_id=ids[-1],
-                reply_markup=ui.kb(
-                    (preview_buttons.inline_keyboard if preview_buttons else [])
-                    + controls.inline_keyboard
-                ),
-            )
+            if album:
+                await bot.edit_message_reply_markup(
+                    chat_id=uid,
+                    message_id=ids[-1],
+                    reply_markup=markup,
+                )
             preview_ready = True
         except (TelegramBadRequest, ValueError) as exc:
             await bot.send_message(
@@ -135,13 +191,13 @@ async def show_post(bot, uid, pid, with_preview=True, *, panel=True):
     if preview_ready:
         await ui.clear_controls(bot, uid, ui.panel_id(uid))
         await ui.track_controls(bot, uid, f"post:{pid}", m)
+        if separate_controls:
+            await ui.show_panel(bot, uid, text[:3900], controls)
     elif panel:
-        await ui.show_panel(bot, uid, text[:3900], ui.post_controls(pid, p["status"]))
+        await ui.show_panel(bot, uid, text[:3900], controls)
         await ui.retire_controls(bot, uid, f"post:{pid}")
     else:
-        control = await bot.send_message(
-            uid, text[:3900], reply_markup=ui.post_controls(pid, p["status"])
-        )
+        control = await bot.send_message(uid, text[:3900], reply_markup=controls)
         ids.append(control.message_id)
     database.execute(
         "UPDATE posts SET preview_ids=? WHERE id=?", (json.dumps(ids), pid)
@@ -293,6 +349,10 @@ async def post_action(c: CallbackQuery, state: FSMContext, bot: Bot):
             "delete",
             "delafter",
             "delcustom",
+            "pin",
+            "pinset",
+            "pincustom",
+            "protect",
             "time",
         }
         and p["status"] == "scheduled"
@@ -406,6 +466,53 @@ async def post_action(c: CallbackQuery, state: FSMContext, bot: Bot):
                 ),
                 ui.back(f"p:{pid}:edit"),
             )
+    elif action == "protect":
+        database.execute(
+            "UPDATE posts SET protect_content=? WHERE id=?",
+            (int(not p["protect_content"]), pid),
+        )
+        content.reset_snapshot(pid)
+        await show_post(bot, uid, pid, reuse_preview=True)
+    elif action == "pin":
+        current = (
+            preferences.display(uid, p["pin_until"])
+            if p["pin_until"]
+            else tr("Без срока")
+            if p["pin_enabled"]
+            else tr("Выключено")
+        )
+        await ui.edit(
+            c,
+            tr("📌 Закрепление: {value}", value=current),
+            ui.kb(
+                [
+                    [ui.choice(tr("До даты и времени"), f"p:{pid}:pincustom")],
+                    [
+                        ui.choice(tr("Без срока"), f"p:{pid}:pinset:on"),
+                        ui.choice(tr("Выключено"), f"p:{pid}:pinset:off"),
+                    ],
+                    [ui.choice(tr("Назад"), f"p:{pid}:preview")],
+                ]
+            ),
+        )
+    elif action == "pinset":
+        if parts[3] not in {"on", "off"}:
+            raise ValueError(tr("Неизвестное действие."))
+        database.execute(
+            "UPDATE posts SET pin_enabled=?,pin_until=NULL WHERE id=?",
+            (int(parts[3] == "on"), pid),
+        )
+        content.reset_snapshot(pid)
+        await show_post(bot, uid, pid, reuse_preview=True)
+    elif action == "pincustom":
+        await state.set_state(PostCreate.pin)
+        await ui.edit(
+            c,
+            tr(
+                "До какого времени закрепить пост? Введите дату и время: 25.12.2026 18:30, в вашем часовом поясе. По истечении срока бот открепит только этот пост."
+            ),
+            ui.back(f"p:{pid}:pin"),
+        )
     elif action == "delete":
         rows = [
             [
@@ -662,6 +769,7 @@ async def post_action(c: CallbackQuery, state: FSMContext, bot: Bot):
 @router.message(PostCreate.cover, ~F.successful_payment, ~F.text.startswith("/"))
 @router.message(PostCreate.buttons, F.text)
 @router.message(PostCreate.delete, F.text)
+@router.message(PostCreate.pin, F.text)
 @router.message(PostCreate.schedule, F.text)
 async def edit_post_value(m: Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
@@ -778,6 +886,14 @@ async def edit_post_value(m: Message, state: FSMContext, bot: Bot):
         database.execute(
             "UPDATE posts SET delete_after_seconds=? WHERE id=?", (seconds, pid)
         )
+    elif stage == PostCreate.pin.state:
+        dt = preferences.parse_local(m.from_user.id, m.text)
+        if dt <= timeutils.now():
+            raise ValueError(tr("Это время уже прошло."))
+        database.execute(
+            "UPDATE posts SET pin_enabled=1,pin_until=? WHERE id=?",
+            (timeutils.iso(dt), pid),
+        )
     elif stage == PostCreate.schedule.state:
         dt = preferences.parse_local(m.from_user.id, m.text)
         if dt <= timeutils.now():
@@ -815,6 +931,8 @@ def schedule_post(pid, uid, dt):
     p = content.mutable_post(pid, uid)
     if dt <= timeutils.now():
         raise ValueError(tr("Время должно быть в будущем."))
+    if p["pin_enabled"] and p["pin_until"] and timeutils.parse_dt(p["pin_until"]) <= dt:
+        raise ValueError(tr("Срок закрепления должен быть позже времени публикации."))
     targets = post_target_rows(pid)
     if not targets:
         raise ValueError(tr("Сначала выберите получателей."))
@@ -860,6 +978,9 @@ async def execute_publish(pid, bot, automatic=False):
             "UPDATE scheduled_posts SET active=0 WHERE post_id=?", (pid,)
         )
     p = database.one("SELECT * FROM posts WHERE id=?", (pid,))
+    pin_requested = bool(p["pin_enabled"]) and (
+        not p["pin_until"] or timeutils.parse_dt(p["pin_until"]) > timeutils.now()
+    )
     activate(p["owner_telegram_id"])
     targets = post_target_rows(pid)
     for ch in targets:
@@ -893,6 +1014,12 @@ async def execute_publish(pid, bot, automatic=False):
                 if delivery["payload_json"]
                 else content.render_payload(p, ch, ch["template_id"])
             )
+            if pin_requested:
+                from services import post_pins
+
+                await post_pins.check_rights(
+                    bot, ch["telegram_chat_id"], p["owner_telegram_id"]
+                )
             database.execute(
                 "UPDATE post_targets SET status='sending',payload_json=?,error=NULL WHERE post_id=? AND channel_id=?",
                 (json.dumps(d, ensure_ascii=False), pid, ch["id"]),
@@ -926,6 +1053,11 @@ async def execute_publish(pid, bot, automatic=False):
                     "UPDATE post_targets SET status='sent',error=NULL WHERE post_id=? AND channel_id=?",
                     (pid, ch["id"]),
                 )
+                if pin_requested:
+                    database.db.execute(
+                        "UPDATE published_messages SET pin_state='pending',unpin_at=? WHERE post_id=? AND channel_id=? AND telegram_message_id=?",
+                        (p["pin_until"], pid, ch["id"], messages[0].message_id),
+                    )
         except Exception as exc:
             if isinstance(exc, TelegramRetryAfter):
                 database.execute(
@@ -1007,6 +1139,10 @@ async def execute_publish(pid, bot, automatic=False):
                 (pid, retry, timeutils.iso()),
             )
         result = "scheduled"
+    if p["pin_enabled"]:
+        from services import post_pins
+
+        await post_pins.process(bot, pid)
     await accounts.check_referral(p["owner_telegram_id"], bot)
     return result
 
@@ -1024,6 +1160,19 @@ async def demo_button(c: CallbackQuery):
 @router.callback_query(F.data.startswith("sub:"))
 @router.callback_query(F.data.startswith("alert:"))
 async def published_action(c: CallbackQuery, bot: Bot):
+    if not c.message:
+        return
+    from services.reactions import locks
+
+    key = (c.message.chat.id, c.message.message_id)
+    lock = locks.get(key)
+    if lock is None:
+        lock = locks[key] = asyncio.Lock()
+    async with lock:
+        await published_action_locked(c, bot)
+
+
+async def published_action_locked(c, bot):
     _, pid, bid = c.data.split(":")
     pid = int(pid)
     if not c.message:
@@ -1039,16 +1188,17 @@ async def published_action(c: CallbackQuery, bot: Bot):
     if not b:
         raise ValueError(tr("Кнопка не найдена."))
     if b["type"] == "reaction":
-        database.execute(
-            "INSERT OR IGNORE INTO post_reactions(post_id,channel_id,telegram_message_id,button_id,user_id,created_at) VALUES(?,?,?,?,?,?)",
-            (
-                pid,
-                delivery["channel_id"],
-                c.message.message_id,
-                bid,
-                c.from_user.id,
-                timeutils.iso(),
+        from services.reactions import toggle
+
+        toggle(
+            "post_reactions",
+            dict(
+                post_id=pid,
+                channel_id=delivery["channel_id"],
+                telegram_message_id=c.message.message_id,
             ),
+            bid,
+            c.from_user.id,
         )
         counts = {
             r["button_id"]: r["n"]
@@ -1083,25 +1233,42 @@ async def published_action(c: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data == "menu:posts")
 async def menu_posts(c: CallbackQuery):
+    from app.features import multipost
+
+    multipost.cleanup_cancelled(c.from_user.id)
     draft = database.one(
-        "SELECT id FROM posts WHERE owner_telegram_id=? AND status='draft' ORDER BY id DESC LIMIT 1",
+        "SELECT id FROM posts WHERE owner_telegram_id=? AND status='draft' AND NOT EXISTS (SELECT 1 FROM multipost_items i WHERE i.post_id=posts.id) ORDER BY id DESC LIMIT 1",
         (c.from_user.id,),
     )
     await ui.edit(
         c,
         tr("📢 Автопостинг\nСоздайте пост или посмотрите отложенные публикации."),
-        ui.kb(
-            [
-                *(
-                    [[ui.choice(tr("Продолжить черновик"), f"p:{draft['id']}:preview")]]
-                    if draft
-                    else []
-                ),
-                [
-                    ui.choice(tr("➕ Создать пост"), "post:create"),
-                    ui.choice(tr("🕐 Отложенные"), "post:scheduled"),
-                ],
-                [ui.choice(tr("⬅️ Главное меню"), "menu:main")],
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [ui.button_style(button) for button in row]
+                for row in [
+                    *(
+                        [
+                            [
+                                ui.choice(
+                                    tr("Продолжить черновик"),
+                                    f"p:{draft['id']}:preview",
+                                )
+                            ]
+                        ]
+                        if draft
+                        else []
+                    ),
+                    [
+                        ui.choice(tr("➕ Создать пост"), "post:create"),
+                        ui.choice(tr("➕ Серия постов"), "multi:new"),
+                    ],
+                    [
+                        ui.choice(tr("✏️ Старый пост"), "live:start"),
+                        ui.choice(tr("🕐 Отложенные"), "post:scheduled"),
+                    ],
+                    [ui.choice(tr("⬅️ Главное меню"), "menu:main")],
+                ]
             ]
         ),
     )
@@ -1126,6 +1293,9 @@ async def receive_post(m: Message, state: FSMContext, bot: Bot):
 
 @router.callback_query(F.data == "post:scheduled")
 async def post_list(c: CallbackQuery):
+    from app.features import multipost
+
+    multipost.cleanup_cancelled(c.from_user.id)
     rows = database.all_rows(
         "SELECT p.*,s.publish_at FROM posts p JOIN scheduled_posts s ON s.post_id=p.id WHERE p.owner_telegram_id=? AND p.status='scheduled' AND s.active=1 ORDER BY s.publish_at LIMIT 50",
         (c.from_user.id,),
@@ -1140,10 +1310,26 @@ async def post_list(c: CallbackQuery):
         ],
         2,
     )
+    batches = database.all_rows(
+        "SELECT b.*,COUNT(i.post_id) AS item_count FROM multipost_batches b LEFT JOIN multipost_items i ON i.batch_id=b.id WHERE b.owner_id=? AND b.status IN ('draft','scheduled') GROUP BY b.id ORDER BY b.start_at,b.id LIMIT 50",
+        (c.from_user.id,),
+    )
+    buttons.extend(
+        [
+            [
+                ui.choice(
+                    f"📚 #{b['id']} · {b['item_count']} · {STATUS[b['status']]}",
+                    f"multi:{b['id']}:open",
+                )
+            ]
+            for b in batches
+        ]
+    )
     buttons.append([ui.choice(tr("⬅️ Автопостинг"), "menu:posts")])
     await ui.edit(
         c,
-        tr("🕐 Запланированные публикации") + (tr(" — пока пусто") if not rows else ""),
+        tr("🕐 Запланированные публикации")
+        + (tr(" — пока пусто") if not rows and not batches else ""),
         ui.kb(buttons),
     )
     await c.answer()

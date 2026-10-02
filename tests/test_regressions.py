@@ -634,7 +634,18 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
             dispatcher.start_polling.assert_awaited_once()
             self.assertEqual(events, ["jobs", "telegram"])
             self.assertIsNone(database.db)
-            self.assertEqual(scheduler.add_job.call_count, 10)
+            self.assertEqual(scheduler.add_job.call_count, 11)
+            pin_job = next(
+                call
+                for call in scheduler.add_job.call_args_list
+                if getattr(call.args[0], "__wrapped__", None)
+                is application.scheduled_jobs.scheduler_pins
+            )
+            self.assertEqual(pin_job.args[1], "interval")
+            self.assertEqual(
+                pin_job.kwargs,
+                dict(seconds=10, args=[client], max_instances=1, coalesce=True),
+            )
             self.assertEqual(
                 dispatcher.start_polling.await_args.kwargs["tasks_concurrency_limit"],
                 100,

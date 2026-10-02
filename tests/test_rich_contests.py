@@ -31,7 +31,31 @@ class RichContestTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.state.get_data())["step"], "prize_title")
             await contests.accept(c.message, self.state, self.bot, "Camera")
             rows = answer.await_args.kwargs["reply_markup"].inline_keyboard
-            self.assertEqual(sum(map(len, rows)), 7)
+            self.assertEqual([len(row) for row in rows], [3, 3, 3, 3, 2, 3])
+            actions = {button.callback_data for row in rows for button in row}
+            self.assertTrue(
+                {
+                    "contest:edit:winners",
+                    "contest:edit:end",
+                    "contest:edit:captcha",
+                    "contest:subscriptions",
+                    "contest:discard",
+                    "contest:create",
+                }
+                <= actions
+            )
+            self.assertEqual(rows[-1][-1].callback_data, "contest:create")
+            # Missing channels must not crash a saved draft; title lookup is batched.
+            await self.state.update_data(channel_ids=[self.cid, 999999])
+            with patch.object(db, "all_rows", wraps=db.all_rows) as queries:
+                await contests.draft_panel(c, self.state, True)
+                title_queries = [
+                    call
+                    for call in queries.call_args_list
+                    if "SELECT id,title FROM channels" in call.args[0]
+                ]
+                self.assertEqual(len(title_queries), 1)
+            self.assertIn("999999", edit.await_args.args[1])
             for section in ("prize", "rules", "dates", "post"):
                 c.data = f"contest:section:{section}"
                 await contests.form_section(c, self.state)

@@ -35,7 +35,15 @@ class Guard(BaseMiddleware):
             return
         # Do not register public button clicks before /start: referrals are attributed on first start.
         public = isinstance(event, CallbackQuery) and (event.data or "").startswith(
-            ("action:", "react:", "sub:", "alert:", "demo", "contest:participate:")
+            (
+                "action:",
+                "react:",
+                "sub:",
+                "alert:",
+                "demo",
+                "lb:",
+                "contest:participate:",
+            )
         )
         if not public and not (
             isinstance(event, Message) and (event.text or "").startswith("/start")
@@ -70,6 +78,7 @@ class Guard(BaseMiddleware):
                     "multi:",
                     "contest:",
                     "broadcast:",
+                    "live:",
                 )
             )
         ):

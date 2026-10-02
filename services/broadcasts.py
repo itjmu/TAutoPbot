@@ -57,7 +57,10 @@ async def tick(bot):
         draft = json.loads(row["payload"])
         try:
             if len(draft["ids"]) > 1:
-                sent = await bot.copy_messages(
+                method = (
+                    bot.forward_messages if draft.get("forward") else bot.copy_messages
+                )
+                sent = await method(
                     row["user_id"], draft["chat_id"], sorted(draft["ids"])
                 )
                 if len(sent) != len(draft["ids"]):
@@ -67,9 +70,10 @@ async def tick(bot):
                     )
                     continue
             else:
-                sent = await bot.copy_message(
-                    row["user_id"], draft["chat_id"], draft["ids"][0]
+                method = (
+                    bot.forward_message if draft.get("forward") else bot.copy_message
                 )
+                sent = await method(row["user_id"], draft["chat_id"], draft["ids"][0])
             db.execute(
                 "UPDATE broadcast_targets SET status='sent',error=NULL WHERE job_id=? AND user_id=?",
                 key,

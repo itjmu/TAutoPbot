@@ -1,5 +1,8 @@
 # Linux launch (Python 3.11+)
 
+For an existing server, follow [UPGRADE.md](UPGRADE.md) instead of fresh-install
+steps. Use the code-only ZIP and preserve the server database and environment.
+
 Use a single polling process per bot token/database. The service runs as an
 unprivileged user. No public HTTP port is required.
 

@@ -1,6 +1,6 @@
 # TAutoPbot — final project handoff
 
-Snapshot: **24 September 2026**. Package/runtime version: **4.0.0**.
+Snapshot: **30 September 2026**. Package/runtime version: **4.0.0**.
 
 This document describes the current working-tree implementation, including changes that may not yet be committed. The owner considers this the final functional baseline: future work should normally be small corrections, not a redesign. “Final” is a product-scope decision, not a claim that every external service or live Telegram flow has been verified.
 
@@ -13,7 +13,7 @@ This document describes the current working-tree implementation, including chang
 5. Use small, targeted changes and relevant offline tests. Avoid unrelated refactoring and dependency upgrades.
 6. Distinguish implemented behavior, offline verification and live Telegram verification in any report.
 
-The owner prefers minimal token use, autonomous action, very short progress updates and a short English completion message. Do not repeatedly request permission for ordinary authorized edits. Do not start extra agents unless requested. A question is appropriate when a genuinely necessary product choice cannot be inferred.
+The owner writes in Russian and wants **concise English responses**, minimal token/tool/usage-limit consumption, and more action than explanation. These are assistant communication preferences, not a request to translate the bot UI. Inspect only relevant code, batch independent reads, and avoid repeating successful checks without a reason. Do not sacrifice required work or verification to save tokens. Preserve this working project: future scope includes requested bug fixes, improvements, performance checks and new features, without removing or breaking existing functionality. Measure relevant performance changes and retest functionality. See `AGENTS.md` for persistent working rules.
 
 ### Relationship to existing documentation
 
@@ -24,7 +24,38 @@ The owner prefers minimal token use, autonomous action, very short progress upda
 
 Suggested prompt for a successor AI:
 
-> Read FINAL_PROJECT_HANDOFF.md. Preserve this final baseline and all existing working-tree changes. Implement only my requested small correction, inspect the relevant code, and run focused offline checks. Do not reset the database, start a second bot, restore Premium trials, or claim live verification from unit tests. Keep communication and token use minimal.
+> Read AGENTS.md and FINAL_PROJECT_HANDOFF.md. Preserve the working project, all existing features and working-tree changes. Implement my requested fixes, improvements or new features; retest affected functionality and measure performance when relevant. Reply briefly in English even when I write in Russian. Minimize tokens and unnecessary tool use. Do not repeat historical resets or live actions, start a second bot, or claim live verification from unit tests.
+
+## Latest baseline: additions since 24 September
+
+- **Round videos, broadcast forwarding and upgrades (2 October):** shared post intake/send supports `video_note` file IDs (drafts, previews, scheduling and publication). Native notes have no captions: descriptions/templates are sent as a tracked companion text with buttons, preserving formatting/protection and partial-delivery records. Without text, buttons attach directly to the note in one send. Published-note media editing remains unsupported by the existing in-place editor. Newly submitted forwarded admin broadcasts persist a forward flag and use forwardMessage/forwardMessages; ordinary messages and old queued jobs retain copy behavior. Durable retry/uncertain handling and pacing remain unchanged. `deploy/UPGRADE.md` documents existing-server upgrades using its own DB; `deploy/package_release.py` produces an allowlisted code-only ZIP without local DB/env/cookies/systemd replacement. No production DB, live broadcasts, deployment or restart was performed.
+- **Forwarded inbox fix (1 October):** incoming serialization restores required origin type tags while excluding aiogram internal defaults, preserving default link-preview compatibility. Loading older saved messages reconstructs missing origin discriminators for channel/chat/user/hidden-user origins, including nested messages. Existing Create post callbacks work without forwarding again; formatting, ownership and repeated-click draft reuse remain intact. Offline regression covers all four origins in new and legacy stored messages.
+- **Contest editor simplification (1 October):** Create post now occupies the main menu's first position, above Autoposting. Current contest drafts use fixed rows with direct content/media/preview, prize/winners/delivery, subscriptions/draw method/captcha, start/end/contact, template/additional settings, and Cancel/Save/Publish. Existing section callbacks and advanced prize options remain available. Contest menu labels spell out “Create contest” and “My contests”. Missing saved channels no longer crash the editor; channel titles use one query instead of one per channel. Long content is shortened only in the settings summary, not stored or published content. Offline SQLite benchmark (5,000 refreshes, 20 channels): 0.1840 s before / 0.1341 s after; this measures title lookup only, not Telegram latency.
+- **Autoposting navigation (1 October):** main menu includes Create post; series creation moved into Autoposting. Fixed rows: Resume draft (only standalone drafts, when present); Create post / Post series; Edit old post / Scheduled; Main menu. Scheduled lists both scheduled posts and draft/active series. Legacy `menu:multi` callbacks open Autoposting. Cancellation deletes series metadata and safely unsent posts, disables remaining schedules, and preserves published/in-flight/uncertain delivery records. Existing cancelled series are cleaned for their owner when opening Autoposting or Scheduled. A monotonic ID watermark prevents deleted series IDs being reused by stale buttons. No live database cleanup or bot restart was performed during implementation.
+- **Post controls (1 October):** dedicated Premium/custom-emoji insertion by message/ID/HTML/MarkdownV2 was removed at the owner's request; normal stored message entities and existing template HTML support are unchanged. Draft/scheduled editor rows are fixed: Description / Replace / Cover (video only); Channels / Template / Buttons; Time / Pin / Auto-delete; Cancel / No copying checkbox / Publish. Short localized labels retain existing callbacks and action semantics; general menu reflow must not rearrange these rows.
+- **Single-choice reactions:** one selection per user per published message. Clicking the selected reaction removes it; clicking another moves the vote. Ordinary and edited publications share message locks so delayed count edits cannot overwrite newer counts or restore obsolete buttons. Known voter identities are carried into new published-editor sessions; legacy multiple selections normalize on interaction (or when imported into an edited session), without resetting unrelated users. Unknown historical aggregate offsets are retained rather than fabricated as identifiable users.
+- **Preview speed:** non-album previews send their keyboard with the content instead of making a second edit request. The real pacer with a simulated 10 ms API measured a median of 1.0826 s before and 0.0163 s after across three fresh text previews. This is an offline UI-workload result, not live publication throughput. See `PREVIEW_PERFORMANCE.md` and `tests/benchmark_post_preview.py`. Fresh-preview placement, album handling and rate limits remain intact.
+- **Bulk link buttons:** row `+` → `📋 Ссылки списком` accepts alternating label/link lines (URLs or @usernames only); blank lines begin a new row, overflow wraps at 8 columns, and later existing rows shift down without losing buttons. Templates also expose bulk entry. Other action types remain available individually. A malformed batch or total over 100 is rejected before saving.
+- **Publication options:** `📌 Закрепить` offers no expiry or a date/time in the user's configured time zone. Durable pin/unpin jobs run every 10 seconds and always address the exact published message; albums pin the first media message. Both owner and bot pin/edit rights are checked before sending. Transient pin failures retry independently and never resend the post; permanent failures notify the owner. A delayed publication after its pin deadline is sent without pinning. The copy/forward protection checkbox passes Telegram `protect_content` on text, every media type, albums and their button companion; previews remain unprotected. Existing drafts default to both options off; migrations are additive.
+- **Direct forwarding:** Telegram controls keyboards on native chat-to-chat forwards. URL-only keyboards use ordinary URL buttons with no editor callbacks. Callback actions can cause Telegram to drop the entire keyboard; the bot cannot override this. No callback actions were converted to links, and forwarding with hidden sender/copying or to secret chats cannot be guaranteed. Enabling content protection intentionally prevents forwarding.
+- **Post button constructor:** `+` beside a row adds to that row; the bottom `+` adds a row. Existing buttons open edit/delete controls. Author-defined rows are preserved in preview and publication; the general three-column menu layout must not reflow them. The former 20-button application cap was removed; Telegram keyboard limits remain.
+- **Latest preview preference:** after saving or deleting a button, send the updated preview at the bottom of the private chat, then remove the old preview after successful delivery. Intermediate choices/input prompts edit the existing preview keyboard. Done/Back/Menu stay beneath it, without a separate panel after every addition. Do not revert to keeping every completed edit on a preview that scrolls out of view.
+- **Published-post editing:** Autoposting → Edit published post accepts a channel forward with a visible source. Edit text/entities, captions, media, video cover, buttons, templates and link cleanup; reset unsaved changes. Saving edits the original channel/message ID, never deletes and republishes it. Both user and bot editing permissions are checked again on save. Scheduling and choosing a different destination are not replacements for editing an existing message.
+- **Published buttons:** the shared constructor supports adding, renaming, changing URL/action values/color and deleting buttons, including confirmed removal of all buttons. Reactions, subscription checks and alerts are scoped to the exact message; obsolete callbacks cannot restore prior markup. Unknown external button logic cannot be reconstructed. If original buttons are absent from both the forward and DB, saving without them requires explicit UI confirmation.
+- **Button presentation:** suitable icons; neutral/default, blue navigation/settings, red destructive actions, green confirmation/create actions. General menus use at most three columns, fewer for long labels. Explicit author-selected publication styles/layout remain intact.
+- **Administrator controls:** private ADMIN_ID-only full SQLite snapshot and users CSV export; paginated user list and ID/@username search; block/unblock; personal channel/source/daily post/cover/video/color limits. Zero denies the corresponding capability; supported `-1` means unlimited, and “тариф” restores plan defaults. Profile deletion disables the account and removes profile/preferences/FSM while retaining accounting/publication records. It is not full data erasure.
+- **Reliability/performance:** durable broadcast jobs and recipient states, RetryAfter scheduling, isolated album failures, fairer join-request selection, resumable contest membership checks and independent closing workers. User registration/FSM use the bounded batched SQLite worker; remaining synchronous SQL has a short busy timeout. Telegram pacing and shutdown draining remain enabled. Download intake is bounded at 32 tasks.
+- **Operations:** `manage.py health`, `backup-live`, optional daily systemd backup timer; explicit reset can opt out of backup with `--no-backup`. These capabilities are not instructions to execute maintenance.
+
+Latest complete offline result: **193 tests passed in 41.502 seconds**, recorded in `round_video_broadcast_tests.log`; Ruff lint and format passed for changed files. Includes contest layout, missing-channel handling, batched title lookup, menu order, combined queue, cancellation cleanup, ownership and stale callback checks. The successful run explicitly used the installed Python binary for subprocesses after Windows app-alias subprocess timeouts. No live Telegram publication or bot restart was performed for these changes.
+
+Earlier authorized live checks in the test channel covered rich formatting, a scheduled photo without duplicates, an album, a zero-participant contest/result edit and deletion. Test messages were removed. The latest published-editor/button changes were verified offline, not by modifying live channel posts.
+
+The owner explicitly authorized a one-time full DB reset without a new backup, deletion of old backups and removal of pending Telegram updates. Those operations completed; the update count was zero at that check. **Do not repeat them or assume the DB is still empty.** Later user activity may have changed it. The assistant did not start polling during the latest edits; inspect actual process state before operational work.
+
+Linux/server acceptance remains outstanding: the owner last reported no server. Do not claim a live systemd/Linux run, real Stars purchase or sustained production load test. Dependencies still use ranges; no completed advisory audit or platform-specific lockfile is implied. The earlier 2000-user DB/FSM synthetic benchmark improved from 9.778 s to 0.373 s, with loop gap 9.767 s to 0.044 s; this is local Windows evidence, not Telegram throughput or a current benchmark.
+
+Details: `POST_EDITING.md`, `ADMIN_CONTROLS.md`, `LAUNCH_FIXES_2026-09-25.md`, `RELEASE_ACCEPTANCE.md`, `CLEAN_START_2026-09-25.md`. Audit reports describe historical states; backups named in older reports were subsequently deleted at the owner's request.
 
 ## 2. Product and runtime
 
@@ -72,7 +103,7 @@ flowchart TD
 |---|---|
 | `bot.py` | Small executable entry point; application logic belongs under `app/` |
 | `config.py` | Environment configuration and validation; imports do not launch the bot |
-| `manage.py` | Database check, backup and explicit reset maintenance commands |
+| `manage.py` | Check, backup, live backup, heartbeat health and explicit reset commands |
 | `app/application.py` | Process lock, DB initialization, recovery, Dispatcher, scheduler, shutdown |
 | `app/routing.py` | Explicit router ordering; common commands early, fallback last |
 | `app/middleware.py` | Private/public update handling, language context, blocks, FSM navigation cleanup, errors |
@@ -96,6 +127,8 @@ flowchart TD
 | `channels.py` | Channel list, bottom pickers, connection, rights and channel settings |
 | `posts.py` | `show_post`, `post_action`, draft editing, scheduling, `execute_publish`, post lists |
 | `editors.py` | Guided button/template editing and related validated inputs |
+| `published_editor.py` | Forwarded channel-message editing, shared live button sessions, per-message public callbacks |
+| `user_admin.py` | Private admin exports, user search, blocks, personal limits and profile deletion |
 | `sources.py` | Telegram source ingestion, mapping, deduplication, album queue/flush |
 | `multipost.py` | Batch intake, timetable validation, confirmation and scheduling |
 | `downloads.py` | URL intake, background inspection/download, format selection, uploads and cancellation |
@@ -121,7 +154,9 @@ flowchart TD
 | `app/downloader.py` | URL/format inspection, extraction, site fallbacks, original audio preference, worker protocol |
 | `app/download_worker.py` | Isolated extraction worker entry point; does not open the application DB |
 
-Router order is intentional: common → preferences → multipost → contests → payments → conditions → channels → posts → sources → admin → referrals → editors → downloads → fallback. Avoid broad message filters that intercept payments, commands, albums or another wizard's input.
+Router order is intentional; inspect `app/routing.py`. Published editing follows posts, user administration follows admin, and fallback remains last. Avoid broad message filters that intercept payments, commands, albums or another wizard's input. `live:` preserves the editor FSM; `lb:` is a public, message-bound button action. Button scopes are `p` (draft), `t` (template), `l` (published-edit session).
+
+Additional services: `services/sqlite_worker.py` (bounded single-writer batches), `services/telegram_rate.py` (API pacing/RetryAfter), `services/runtime.py` (in-flight shutdown draining), and `services/broadcasts.py` (durable recipient queue). These are part of the working baseline.
 
 ## 4. Startup, jobs and shutdown
 
@@ -131,16 +166,21 @@ Startup initializes/migrates the DB, runs contest recovery and marks interrupted
 
 | Scheduled job | Interval |
 |---|---:|
-| Post publication | 10 seconds |
-| Contest tick | 10 seconds |
+| Post publication | 1 second |
+| Contest tick | 2 seconds |
+| Contest closing workers | 2 seconds |
+| Broadcast delivery | 2 seconds |
 | Album flush | 2 seconds |
 | Scheduled deletion | 30 seconds |
+| Pin/unpin jobs | 10 seconds |
 | Join requests / approval notifications | 300 seconds |
 | Rights checks | 21,600 seconds |
 | Premium notifications | 1,800 seconds |
 | Runtime heartbeat | 20 seconds |
 
 Jobs use `max_instances=1` and coalescing. Shutdown stops scheduler activity, closes background jobs and child processes, then closes Telegram and the database. Preserve this order: sending after session closure or deleting files before worker exit causes failures.
+
+Post selection is up to 200 due jobs with four concurrent publishers; contest closing uses up to four workers. Polling limits concurrent updates to 100. These are concurrency bounds, not promised throughput. Registration/FSM writes use the SQLite worker; do not await inside a synchronous `atomic()` block.
 
 ## 5. Navigation and message lifecycle
 
@@ -177,19 +217,19 @@ Supported connection paths:
 
 ### Creation and preview
 
-Autoposting offers Create, Scheduled and **Continue draft** when an unfinished draft exists. The shortcut resumes the latest draft by ID. A draft without recipients opens target selection rather than failing.
+Autoposting offers Create, Scheduled, **Edit published post**, and **Continue draft** when an unfinished draft exists. The shortcut resumes the latest draft by ID. A draft without recipients opens target selection rather than failing.
 
 Post creation accepts Telegram content; albums are assembled through the intake queue. Recipients may be selected individually. `content.create_draft`, `post_owned` and `mutable_post` separate creation, ownership and editability checks.
 
 For editable drafts, `show_post` sends the preview and attaches editing controls directly to it. The separate “Post #… / status / recipients” card is not shown after a successful preview. Diagnostic/status panels still exist for completed, failed or uncertain operations and for preview failure fallback.
 
-The draft controls occupy three rows:
+The draft controls are grouped by purpose, with responsive row splitting:
 
 1. Description, replace message, buttons; video cover appears when applicable.
 2. Channels, template, time, auto-delete.
 3. Publish, skip, back to autoposting.
 
-There is no visible Edit submenu. Legacy edit callbacks remain for compatibility. Actual post buttons can add rows above editor controls; “three rows” refers to the editor controls, not the full combined markup.
+There is no visible Edit submenu. Legacy edit callbacks remain for compatibility. Actual post buttons appear above editor controls and retain their author-defined rows; only application navigation is automatically compacted. See the latest baseline section and `POST_EDITING.md` for the current `+` constructor and published-message editing.
 
 For albums, controls attach to the last preview message. Preview controls are private UI and must not be accidentally copied into the public post.
 
@@ -338,9 +378,9 @@ Daily quotas reset by **UTC date**, independent of the user's display zone. Play
 
 Payments include Telegram Stars, configurable pricing and supported manual-payment references/review. Premium grants, adjustments, promo codes and usage history are persisted. Do not bypass successful-payment validation or duplicate activation protections.
 
-Admin features include statistics, user/channel lists, logs, blocking, plan limits, prices/payment settings, Premium management, promo codes and referrals.
+Admin features include statistics, searchable/paginated user cards, channel lists, logs, blocking, personal and plan limits, SQLite/CSV exports, profile deletion, prices/payment settings, Premium management, promo codes and referrals. `ADMIN_CONTROLS.md` defines deletion and export scope. Blocked users cannot start checkout, but confirmed successful payments still reach their handler.
 
-Broadcast accepts forwarded or ordinary Telegram messages and media, including albums. Intake stores a draft under `broadcast_draft:{uid}`, gathers album IDs, then requires the explicit send callback. Single messages use `copy_message`; albums use `copy_messages`. Confirmation validates admin/state/token and consumes the draft to prevent replay. Telegram restrictions on copying particular message types still apply; “accept media” is not a promise to copy protected/service content.
+Broadcast accepts forwarded or ordinary Telegram messages and media, including albums. Intake stores a draft under `broadcast_draft:{uid}`, gathers album IDs, then requires the explicit send callback. Confirmation validates admin/state/token, durably enqueues the job and recipients before removing the draft, and prevents replay. Single messages use `copy_message`; albums use `copy_messages`. RetryAfter is scheduled; uncertain delivery requires admin review before retry. Telegram restrictions on copying protected/service content remain.
 
 ## 13. Persistence map and invariants
 
@@ -358,9 +398,16 @@ Broadcast accepts forwarded or ordinary Telegram messages and media, including a
 | `contests`, `contest_publications`, `contest_entries`, `contest_winners`, `contest_outbox` | Contest definition, public copies, participants, results and delivery |
 | `contest_invites`, `contest_channel_referrals` | Personal invite/referral tracking |
 | `fsm_state`, `app_settings` | Persistent conversational state and keyed settings/drafts |
+| `broadcast_jobs`, `broadcast_targets` | Durable broadcasts and recipient delivery/retry state |
+| `contest_checks` | Resumable membership-check progress during contest closing |
+| `edited_reactions` | Per-owner/session/button/user reactions for edited publications |
 | `notifications`, `notification_keys`, `logs`, `runtime_lock` | Notification deduplication/audit/runtime bookkeeping |
 
-This is a logical schema map, not replacement migration SQL. Inspect `init_db`, `init_extensions`, `init_v21`, `init_planning` and migration helpers before altering persistence. In particular:
+Published editing also stores `live_session:{uid}:{oid}` and `published_edit:{chat_id}:{message_id}` in `app_settings`; user limits use `user_limits:{uid}`. Do not purge these as temporary UI state: published buttons depend on completed sessions. Preview hint/refresh keys are separate UI bookkeeping.
+
+Publication settings are stored in `posts.protect_content`, `pin_enabled`, and `pin_until` (UTC). Durable pin state is stored on the exact `published_messages` row in `pin_state`, `unpin_at`, `pin_retry_at`, and `pin_error`; `services/post_pins.py` handles those jobs independently from delivery status.
+
+This is a logical schema map, not replacement migration SQL. Inspect `init_db`, `init_extensions`, `init_v21`, `init_planning`, `init_delivery_queues` and migration helpers before altering persistence. In particular:
 
 - `database.execute` must not commit the middle of an explicit `atomic()` block.
 - Migrations must preserve existing data and handle older schema variants.
@@ -421,13 +468,13 @@ Linux uses the included unprivileged systemd unit; no public HTTP port is requir
 | `test_media.py` | Media preparation/output behavior |
 | `test_worker.py` | Worker subprocess, import safety and OS-lock behavior |
 
-Latest feature verification before this handoff: **69 relevant offline tests passed** across the new contest-form, launch, planning and navigation suites (4 + 21 + 22 + 22). Relevant static checks also passed. This is not a statement that the complete suite was rerun after the final contest edits. Earlier broader checks were run during previous changes; one worker subprocess timeout passed on retry.
+Latest complete suite: **193 tests passed**, including `test_autopost_menu.py`, `test_reaction_selection.py`, `test_bulk_buttons.py`, `test_post_options.py`, `test_button_canvas.py`, `test_edit_in_place.py`, `test_published_buttons.py`, `test_user_admin.py`, `test_launch_reliability.py`, `test_sqlite_worker.py` and `test_maintenance_health.py`. Ruff lint/format passed for changed files. `round_video_broadcast_tests.log` records the full result.
 
 CI is configured for Windows and Ubuntu on Python 3.11/3.13, with Ruff lint/format, unittest and compileall. Configuration is not evidence of a completed remote CI run.
 
 The test suite intentionally simulates delivery failures; expected “connection lost” logs can accompany successful tests. Read the final unittest result instead of interpreting every injected traceback as a regression.
 
-Live Telegram verification remains pending for the latest UI/contest changes. Offline checks do not verify real picker rendering, all permissions, actual Stars payments, all download sites, regional access, cookie freshness or long-running deployment behavior. Do not announce production deployment or a bot restart unless it actually occurred.
+The historical live smoke test covered formatting, scheduled publication, an album, a zero-participant contest/results and deletion. Latest UI/published-editor changes are only offline-verified. Actual Stars purchases, participation with a second account, all download sites, regional access, cookie freshness and long-running Linux behavior remain unverified. Do not announce production deployment or a bot restart unless it occurred.
 
 ### Interrupted-write incident
 
@@ -437,7 +484,7 @@ For a similar symptom, inspect file bytes and current diffs before overwriting a
 
 ## 16. Maintenance plan and remaining practical boundaries
 
-There is no planned feature expansion. For a new small correction:
+Future work may add requested features as well as fix bugs, improve behavior and verify performance. Preserve the existing working product. For each request:
 
 1. Reproduce or identify the exact callback/state/service involved.
 2. Trace its DB mutations and effects on active workflows.

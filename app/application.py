@@ -67,6 +67,7 @@ async def run_application():
         (broadcasts.tick, 2),
         (features_sources.flush_albums, 2),
         (scheduled_jobs.scheduler_delete, 30),
+        (scheduled_jobs.scheduler_pins, 10),
         (scheduled_jobs.scheduler_requests, 300),
         (scheduled_jobs.scheduler_rights, 21600),
         (scheduled_jobs.scheduler_premium_notifications, 1800),

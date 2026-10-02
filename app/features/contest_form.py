@@ -4,6 +4,8 @@ import html
 import secrets
 from datetime import timedelta
 
+from aiogram.types import InlineKeyboardMarkup
+
 from app import accounts, content, preferences, timeutils, ui
 from app import database as db
 from app.i18n import STATUS, tr
@@ -156,36 +158,66 @@ async def panel(message, state, callback=False):
         tr("Настройте приз, условия и сроки. Проверьте пост перед публикацией.")
         + "\n\n"
     )
-    text += service.publication(flow.draft_row(data, uid))["text"]
+    publication = service.publication(flow.draft_row(data, uid))["text"]
+    text += publication[:2200] + ("…" if len(publication) > 2200 else "")
     text += "\n\n📅 " + (
         tr("Сразу после запуска")
         if data["start_now"]
         else preferences.display(uid, data["start"])
     )
-    titles = [
-        db.one("SELECT title FROM channels WHERE id=?", (cid,))[0]
-        for cid in data["channel_ids"]
-    ]
-    text += "\n📺 " + ", ".join(titles)
+    channel_ids = data["channel_ids"]
+    channels_by_id = {
+        row["id"]: row["title"]
+        for row in db.all_rows(
+            "SELECT id,title FROM channels WHERE id IN ("
+            + ",".join("?" for _ in channel_ids)
+            + ")",
+            channel_ids,
+        )
+    }
+    titles = [channels_by_id.get(cid, str(cid)) for cid in channel_ids]
+    text += "\n📺 " + ", ".join(titles)[:600]
     rows = [
         [
+            ui.choice(tr("📝 Описание"), "contest:edit:post"),
+            ui.choice(tr("🖼 Медиа"), "contest:edit:media"),
+            ui.choice(tr("👁 Предпросмотр"), "contest:preview"),
+        ],
+        [
             ui.choice(tr("🎁 Приз"), "contest:section:prize"),
-            ui.choice(tr("👥 Условия"), "contest:section:rules"),
+            ui.choice(tr("🏆 Победители"), "contest:edit:winners"),
+            ui.choice(tr("🎁 Выдача приза"), "contest:edit:prize_kind"),
         ],
         [
-            ui.choice(tr("📅 Сроки"), "contest:section:dates"),
-            ui.choice(tr("✏️ Оформление"), "contest:section:post"),
+            ui.choice(tr("📢 Подписки"), "contest:subscriptions"),
+            ui.choice(tr("🎲 Как выбрать"), "contest:edit:mode"),
+            ui.choice(
+                ("☑ " if data.get("captcha") else "☐ ") + tr("🧮 Капча"),
+                "contest:edit:captcha",
+            ),
         ],
-        [ui.choice(tr("👁 Предпросмотр"), "contest:preview")],
         [
+            ui.choice(tr("📅 Начало"), "contest:edit:start"),
+            ui.choice(tr("🕒 Дата итогов"), "contest:edit:end"),
+            ui.choice(tr("📞 Контакт"), "contest:edit:contact"),
+        ],
+        [
+            ui.choice(tr("🧩 Шаблон"), "contest:edit:post_style"),
+            ui.choice(tr("⚙️ Дополнительно"), "contest:extra"),
+        ],
+        [
+            ui.choice(tr("❌ Отмена"), "contest:discard"),
+            ui.choice(tr("💾 Сохранить"), "menu:contests"),
             ui.choice(tr("🚀 Опубликовать"), "contest:create"),
-            ui.choice(tr("Сохранить и выйти"), "menu:contests"),
         ],
     ]
+    markup = InlineKeyboardMarkup(
+        inline_keyboard=[[ui.button_style(button) for button in row] for row in rows]
+    )
     if callback:
-        await ui.edit(message, html.escape(text), ui.kb(rows))
+        await ui.edit(message, html.escape(text), markup)
     else:
-        await ui.answer(message, html.escape(text), reply_markup=ui.kb(rows))
+        await ui.answer(message, html.escape(text), reply_markup=markup)
 
 
 async def accept(message, state, bot, value, payload):

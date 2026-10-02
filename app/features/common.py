@@ -177,6 +177,40 @@ async def help_menu(c: CallbackQuery):
     await c.answer()
 
 
+def normalize_incoming_message(raw):
+    """Restore discriminator fields omitted by the old default-excluding serializer."""
+    data = json.loads(raw)
+
+    def repair(value):
+        if isinstance(value, list):
+            for item in value:
+                repair(item)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if (
+                    key in {"forward_origin", "origin"}
+                    and isinstance(item, dict)
+                    and "type" not in item
+                ):
+                    for field, kind in (
+                        ("sender_user", "user"),
+                        ("sender_user_name", "hidden_user"),
+                        ("sender_chat", "chat"),
+                        ("chat", "channel"),
+                    ):
+                        if field in item:
+                            item["type"] = kind
+                            break
+                repair(item)
+
+    repair(data)
+    return data
+
+
+def restore_incoming_message(raw):
+    return Message.model_validate(normalize_incoming_message(raw))
+
+
 async def offer_incoming(m, bot):
     if m.from_user is None:
         return
@@ -185,7 +219,12 @@ async def offer_incoming(m, bot):
         "INSERT INTO incoming(owner_id,message_json,links_json,created_at) VALUES(?,?,?,?)",
         (
             m.from_user.id,
-            m.model_dump_json(exclude_none=True, exclude_defaults=True),
+            json.dumps(
+                normalize_incoming_message(
+                    m.model_dump_json(exclude_none=True, exclude_defaults=True)
+                ),
+                ensure_ascii=False,
+            ),
             json.dumps(links),
             timeutils.iso(),
         ),
@@ -247,7 +286,7 @@ async def incoming_action(c: CallbackQuery, bot: Bot):
         if row["post_id"]:
             pid = row["post_id"]
         else:
-            m = Message.model_validate_json(row["message_json"])
+            m = restore_incoming_message(row["message_json"])
             payload = content.message_payload(m)
             if not accounts.use_daily(uid, "post_create"):
                 raise ValueError(tr("Лимит Free: 3 новых поста в день."))

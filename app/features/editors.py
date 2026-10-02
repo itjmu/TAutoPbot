@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
@@ -27,7 +28,54 @@ from config import ADMIN_ID
 router = Router(name="features.editors")
 
 
+def parse_bulk_buttons(raw, existing, start_row):
+    """Insert paired lines, preserving other rows and wrapping at eight columns."""
+    added = []
+    row = start_row
+    count = sum(b["row"] == row for b in existing)
+    label = None
+    new_row = False
+    for line in raw.strip().splitlines():
+        line = line.strip()
+        if not line:
+            if label is not None:
+                raise ValueError(tr("После названия нужна строка со значением."))
+            new_row = bool(added)
+            continue
+        if label is None:
+            if new_row or count >= 8:
+                row += 1
+                count = 0
+                new_row = False
+            label = line
+            continue
+        if not 1 <= len(label) <= 50:
+            raise ValueError(tr("Название: 1–50 символов."))
+        b = dict(id=secrets.token_hex(4), text=label, row=row)
+        url = "https://t.me/" + line[1:] if line.startswith("@") else line
+        if not content.valid_url(url):
+            raise ValueError(
+                tr("Списком можно добавить только ссылки: https://… или @username.")
+            )
+        b.update(type="url", url=url)
+        added.append(b)
+        label = None
+        count += 1
+    if label is not None or not added:
+        raise ValueError(tr("После названия нужна строка со значением."))
+    result = [
+        dict(b, row=b["row"] + row - start_row) if b["row"] > start_row else dict(b)
+        for b in existing
+    ] + added
+    content.validate_buttons(result)
+    return result
+
+
 def button_document(uid, scope, oid, writing=False):
+    if scope == "l":
+        from app.features import published_editor
+
+        return published_editor.load_session(uid, oid).get("buttons", [])
     if scope == "p":
         p = content.mutable_post(oid, uid) if writing else content.post_owned(oid, uid)
         if writing and p["status"] == "scheduled":
@@ -50,10 +98,21 @@ def button_document(uid, scope, oid, writing=False):
 
 
 def save_buttons(uid, scope, oid, buttons):
-    button_document(uid, scope, oid, True)
+    previous = {b["id"]: b for b in button_document(uid, scope, oid, True)}
     content.validate_buttons(buttons)
-    if any(b.get("style") not in accounts.button_styles(uid) for b in buttons):
+    if any(
+        b.get("style") not in accounts.button_styles(uid)
+        and b.get("style") != previous.get(b["id"], {}).get("style")
+        for b in buttons
+    ):
         raise ValueError(tr("Этот цвет недоступен в вашем тарифе."))
+    if scope == "l":
+        from app.features import published_editor
+
+        data = published_editor.load_session(uid, oid)
+        data.update(buttons=buttons, buttons_changed=True, refresh_preview=True)
+        published_editor.store_session(uid, data)
+        return
     table = "posts" if scope == "p" else "templates"
     database.execute(
         f"UPDATE {table} SET buttons_json=? WHERE id=?",
@@ -61,10 +120,31 @@ def save_buttons(uid, scope, oid, buttons):
     )
     if scope == "p":
         content.reset_snapshot(oid)
+        database.execute(
+            "INSERT OR REPLACE INTO app_settings(key,value) VALUES(?, '1')",
+            (f"button_refresh:{uid}:{oid}",),
+        )
 
 
 async def button_panel(c, scope, oid):
     buttons = button_document(c.from_user.id, scope, oid)
+    if scope == "l":
+        from app.features import published_editor
+
+        await published_editor.show_button_editor(c.bot, c.from_user.id, oid)
+        return
+    if scope == "p":
+        from app.features import posts
+
+        refresh = bool(database.setting(f"button_refresh:{c.from_user.id}:{oid}"))
+        await posts.show_post(
+            c.bot, c.from_user.id, oid, button_editor=True, reuse_preview=not refresh
+        )
+        database.execute(
+            "DELETE FROM app_settings WHERE key=?",
+            (f"button_refresh:{c.from_user.id}:{oid}",),
+        )
+        return
     rows = ui.button_grid(
         [
             ui.choice(label, f"bw:new:{scope}:{oid}:{typ}")
@@ -77,6 +157,7 @@ async def button_panel(c, scope, oid):
         ],
         2,
     )
+    rows.append([ui.choice(tr("📋 Ссылки списком"), f"bw:bulk:{scope}:{oid}")])
     for b in buttons:
         rows.append(
             [
@@ -93,13 +174,13 @@ async def button_panel(c, scope, oid):
         )
     parent = f"p:{oid}:preview" if scope == "p" else f"tpl:{oid}:open"
     rows.append([ui.choice(tr("✅ Готово"), parent)])
-    await ui.edit(
-        c,
-        tr(
-            "🔘 Кнопки под постом\nВыберите, какую кнопку добавить. Я задам несколько простых вопросов.\nДля изменения нажмите название уже добавленной кнопки."
-        ),
-        ui.kb(rows),
+    text = tr(
+        "🔘 Кнопки под постом\nВыберите, какую кнопку добавить. Я задам несколько простых вопросов.\nДля изменения нажмите название уже добавленной кнопки."
     )
+    if isinstance(c, Message):
+        await ui.answer(c, text, reply_markup=ui.kb(rows))
+    else:
+        await ui.edit(c, text, ui.kb(rows))
 
 
 async def wizard_start(state, values):
@@ -107,6 +188,101 @@ async def wizard_start(state, values):
     await state.set_data(values)
     await state.set_state(GuidedInput.value)
     return values
+
+
+def button_canvas(uid, scope, oid, rendered=None):
+    buttons = button_document(uid, scope, oid)
+    own = {b["id"] for b in buttons}
+    groups = {}
+    for b in buttons if rendered is None else rendered:
+        groups.setdefault(b["row"], []).append(b)
+    rows = []
+    for row, values in sorted(groups.items()):
+        line = [
+            ui.choice(
+                b["text"],
+                f"bw:item:{scope}:{oid}:{b['id']}" if b["id"] in own else "demo",
+            ).model_copy(update={"style": b.get("style")})
+            for b in values
+        ]
+        if len(line) < 8 and all(b["id"] in own for b in values):
+            line.append(ui.choice("+", f"bw:place:{scope}:{oid}:{row}"))
+        rows.append(line)
+    next_row = max((b["row"] for b in buttons), default=0) + 1
+    rows.append([ui.choice("+", f"bw:place:{scope}:{oid}:{next_row}")])
+    if sum(map(len, rows)) > 97:
+        # Keep the real layout; the separate Add menu remains available.
+        rows = [
+            [b for b in row if not (b.callback_data or "").startswith("bw:place:")]
+            for row in rows
+        ]
+        rows = [row for row in rows if row]
+    if sum(map(len, rows)) <= 97:
+        rows.append(
+            [
+                ui.choice("✅ Готово", f"bw:done:{scope}:{oid}"),
+                ui.choice("⬅️ Назад", f"bw:done:{scope}:{oid}"),
+                ui.choice("🏠 Меню", "menu:posts"),
+            ]
+        )
+    return ui.kb(rows, published=True)
+
+
+async def button_prompt(event, uid, scope, oid, text, markup):
+    if scope not in {"p", "l"}:
+        if isinstance(event, CallbackQuery):
+            return await ui.edit(event, text, markup)
+        return await ui.answer(event, text, reply_markup=markup)
+    database.execute(
+        "INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)",
+        (f"button_hint:{uid}:{scope}:{oid}", text),
+    )
+    rows = [
+        [ui.choice("ℹ️ " + text.split("\n")[0][:52], f"bw:hint:{scope}:{oid}")]
+    ] + list(markup.inline_keyboard)
+    if not any(
+        b.callback_data == f"bw:panel:{scope}:{oid}" for row in rows for b in row
+    ):
+        rows.append([ui.choice("⬅️ Назад", f"bw:panel:{scope}:{oid}")])
+    rows.append([ui.choice("🏠 Меню", "menu:posts")])
+    if scope == "l":
+        from app.features import published_editor
+
+        ids = [published_editor.load_session(uid, oid)["preview_id"]]
+    else:
+        p = content.post_owned(oid, uid)
+        ids = content.entity_list(p["preview_ids"])
+    if not ids:
+        from app.features import posts
+
+        await posts.show_post(event.bot, uid, oid, button_editor=True)
+        ids = content.entity_list(content.post_owned(oid, uid)["preview_ids"])
+    try:
+        await event.bot.edit_message_reply_markup(
+            chat_id=uid, message_id=ids[-1], reply_markup=ui.kb(rows)
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+
+
+async def button_edit(c, scope, oid, text, markup):
+    return await button_prompt(c, c.from_user.id, scope, oid, text, markup)
+
+
+async def finish_placed_button(c, state, d):
+    buttons = button_document(c.from_user.id, d["scope"], d["oid"])
+    b = dict(d["button"], row=d["placement"])
+    existing = next(
+        (i for i, item in enumerate(buttons) if item["id"] == b["id"]), None
+    )
+    if existing is None:
+        buttons.append(b)
+    else:
+        buttons[existing] = b
+    save_buttons(c.from_user.id, d["scope"], d["oid"], buttons)
+    await state.clear()
+    await button_panel(c, d["scope"], d["oid"])
 
 
 def wizard_check(data, token):
@@ -141,10 +317,13 @@ async def ask_color(m, state, uid):
         "success": tr("🟢 Зелёный"),
         "danger": tr("🔴 Красный"),
     }
-    await ui.answer(
+    await button_prompt(
         m,
+        uid,
+        d["scope"],
+        d["oid"],
         tr("Выберите цвет кнопки:"),
-        reply_markup=ui.kb(
+        ui.kb(
             [
                 [
                     ui.choice(
@@ -167,6 +346,27 @@ async def ask_color(m, state, uid):
 async def button_wizard(c: CallbackQuery, state: FSMContext):
     parts = c.data.split(":")
     action = parts[1]
+    if action == "hint":
+        oid = int(parts[3])
+        button_document(c.from_user.id, parts[2], oid)
+        await c.answer(
+            database.setting(f"button_hint:{c.from_user.id}:{parts[2]}:{oid}")[:200],
+            show_alert=True,
+        )
+        return
+    if action == "done":
+        if parts[2] == "l":
+            from app.features import published_editor
+
+            await published_editor.return_to_editor(c, state, int(parts[3]))
+            await c.answer()
+            return
+        from app.features import posts
+
+        await state.clear()
+        await posts.show_post(c.bot, c.from_user.id, int(parts[3]), reuse_preview=True)
+        await c.answer()
+        return
     if action == "color":
         d = await state.get_data()
         wizard_check(d, parts[2])
@@ -177,6 +377,10 @@ async def button_wizard(c: CallbackQuery, state: FSMContext):
             raise ValueError(tr("Этот цвет недоступен в вашем тарифе."))
         d["button"]["style"] = style
         await state.update_data(button=d["button"])
+        if "placement" in d:
+            await finish_placed_button(c, state, d)
+            await c.answer(tr("Кнопка сохранена."))
+            return
         await ask_position(c.message, state)
         await c.answer()
         return
@@ -199,6 +403,88 @@ async def button_wizard(c: CallbackQuery, state: FSMContext):
     scope = parts[2]
     oid = int(parts[3])
     buttons = button_document(c.from_user.id, scope, oid, True)
+    if action == "bulk":
+        row = (
+            int(parts[4])
+            if len(parts) > 4
+            else max((b["row"] for b in buttons), default=0) + 1
+        )
+        if row not in {b["row"] for b in buttons} | {
+            max((b["row"] for b in buttons), default=0) + 1
+        }:
+            raise ValueError(tr("Этот шаг устарел. Откройте настройку заново."))
+        await wizard_start(
+            state, dict(kind="buttons_bulk", scope=scope, oid=oid, placement=row)
+        )
+        await ui.answer(
+            c.message,
+            tr(
+                "Отправьте список ссылок: название кнопки, затем ссылка или @username с новой строки. Пустая строка — новый ряд. Каждые 8 кнопок автоматически переносятся.\n\nПример:\nКанал\nhttps://t.me/telegram\nСайт\nhttps://example.com\n\nНовости\n@telegram"
+            ),
+            reply_markup=ui.back(f"bw:panel:{scope}:{oid}"),
+        )
+        await c.answer()
+        return
+    if action == "places":
+        rows = [
+            [ui.choice(f"➕ В строку {row}", f"bw:place:{scope}:{oid}:{row}")]
+            for row in sorted({b["row"] for b in buttons})
+            if sum(b["row"] == row for b in buttons) < 8
+        ]
+        rows += [
+            [
+                ui.choice(
+                    "➕ Новая строка",
+                    f"bw:place:{scope}:{oid}:{max((b['row'] for b in buttons), default=0) + 1}",
+                )
+            ],
+            [ui.choice("⬅️ Назад", f"bw:panel:{scope}:{oid}")],
+        ]
+        await button_edit(c, scope, oid, "Где добавить кнопку?", ui.kb(rows))
+        await c.answer()
+        return
+    if action == "place":
+        row = int(parts[4])
+        valid_rows = {b["row"] for b in buttons} | {
+            max((b["row"] for b in buttons), default=0) + 1
+        }
+        if row not in valid_rows or sum(b["row"] == row for b in buttons) >= 8:
+            raise ValueError("Это место уже недоступно. Откройте кнопки заново.")
+        rows = [
+            [ui.choice(label, f"bw:new:{scope}:{oid}:{typ}:{row}")]
+            for typ, label in (
+                ("url", "🔗 Ссылка"),
+                ("reaction", "❤️ Реакция"),
+                ("subscription", "🔐 Подписка"),
+                ("alert", "💬 Подсказка"),
+            )
+        ]
+        rows.append(
+            [ui.choice(tr("📋 Ссылки списком"), f"bw:bulk:{scope}:{oid}:{row}")]
+        )
+        rows.append([ui.choice("⬅️ Назад", f"bw:panel:{scope}:{oid}")])
+        await button_edit(c, scope, oid, "Какую кнопку добавить?", ui.kb(rows))
+        await c.answer()
+        return
+    if action == "item":
+        b = next((b for b in buttons if b["id"] == parts[4]), None)
+        if not b:
+            raise ValueError(tr("Кнопка не найдена."))
+        await button_edit(
+            c,
+            scope,
+            oid,
+            "🔘 " + html.escape(b["text"]),
+            ui.kb(
+                [
+                    [ui.choice("✏️ Изменить", f"bw:edit:{scope}:{oid}:{b['id']}")],
+                    [ui.choice("🗑 Удалить", f"bw:del:{scope}:{oid}:{b['id']}")],
+                    [ui.choice("⬅️ Назад", f"bw:panel:{scope}:{oid}")],
+                ]
+            ),
+        )
+        await c.answer()
+        return
     if action == "del":
         save_buttons(
             c.from_user.id, scope, oid, [b for b in buttons if b["id"] != parts[4]]
@@ -231,20 +517,32 @@ async def button_wizard(c: CallbackQuery, state: FSMContext):
         if not b:
             raise ValueError(tr("Кнопка не найдена."))
     elif action == "new":
-        if len(buttons) >= 20:
-            raise ValueError(tr("Максимум 20 кнопок."))
+        if len(buttons) >= 100:
+            raise ValueError("Telegram допускает максимум 100 кнопок в клавиатуре.")
         typ = parts[4]
         if typ not in {"url", "reaction", "subscription", "alert"}:
             raise ValueError(tr("Неверный тип."))
         b = {"id": secrets.token_hex(4), "type": typ, "row": 1}
     else:
         raise ValueError(tr("Неизвестное действие."))
+    placement = (
+        b["row"] if action == "edit" else int(parts[5]) if len(parts) > 5 else None
+    )
     await wizard_start(
         state,
-        {"kind": "button", "scope": scope, "oid": oid, "button": b, "step": "label"},
+        {
+            "kind": "button",
+            "scope": scope,
+            "oid": oid,
+            "button": b,
+            "step": "label",
+            **({"placement": placement} if placement is not None else {}),
+        },
     )
-    await ui.edit(
+    await button_edit(
         c,
+        scope,
+        oid,
         tr("Как назвать кнопку?\nНапример: «Наш канал», «❤️ Нравится», «Подробнее»."),
         ui.back(f"bw:panel:{scope}:{oid}"),
     )
@@ -434,6 +732,13 @@ async def guided_value(m, state, bot, raw, uid):
     kind = d.get("kind")
     step = d.get("step")
     raw = raw.strip()
+    if kind == "buttons_bulk":
+        existing = button_document(uid, d["scope"], d["oid"])
+        buttons = parse_bulk_buttons(raw, existing, d["placement"])
+        save_buttons(uid, d["scope"], d["oid"], buttons)
+        await state.clear()
+        await button_panel(m, d["scope"], d["oid"])
+        return
     if kind == "condition":
         await features_conditions.condition_value(m, state, bot, raw, uid, d)
         return
@@ -457,14 +762,17 @@ async def guided_value(m, state, bot, raw, uid):
                 raise ValueError(tr("Название: 1–50 символов."))
             b["text"] = raw
             await state.update_data(button=b)
-            if b["type"] == "reaction":
+            if b["type"] in {"reaction", "raw"}:
                 await ask_color(m, state, uid)
                 return
             await state.update_data(
                 step="target" if b["type"] == "subscription" else "value"
             )
-            await ui.answer(
+            await button_prompt(
                 m,
+                uid,
+                d["scope"],
+                d["oid"],
                 tr("На какой канал нужна подписка? Отправьте @username.")
                 if b["type"] == "subscription"
                 else (
@@ -474,6 +782,7 @@ async def guided_value(m, state, bot, raw, uid):
                     if b["type"] == "url"
                     else tr("Что показать при нажатии? До 200 символов.")
                 ),
+                ui.back(f"bw:panel:{d['scope']}:{d['oid']}"),
             )
             return
         if step == "target":
@@ -494,8 +803,13 @@ async def guided_value(m, state, bot, raw, uid):
                 chat_label="@" + chat.username if chat.username else chat.title,
             )
             await state.update_data(button=b, step="value")
-            await ui.answer(
-                m, tr("Какой текст открыть после подписки? До 200 символов.")
+            await button_prompt(
+                m,
+                uid,
+                d["scope"],
+                d["oid"],
+                tr("Какой текст открыть после подписки? До 200 символов."),
+                ui.back(f"bw:panel:{d['scope']}:{d['oid']}"),
             )
             return
         if step == "value":

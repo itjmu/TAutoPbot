@@ -518,8 +518,8 @@ async def menu(c, state):
             list(markup.inline_keyboard)
             + [
                 [
-                    ui.choice(tr("➕ Создать КР"), "contest:new"),
-                    ui.choice(tr("Мои КР"), "contest:mine:0"),
+                    ui.choice(tr("➕ Создать конкурс"), "contest:new"),
+                    ui.choice(tr("📋 Мои конкурсы"), "contest:mine:0"),
                 ],
                 [ui.choice(tr("🎉 Активные конкурсы"), "contest:list:0")],
                 [ui.choice(tr("Главное меню"), "menu:main")],

@@ -11,6 +11,7 @@ class PostCreate(StatesGroup):
     content = State()
     schedule = State()
     delete = State()
+    pin = State()
     edit_content = State()
     cover = State()
     edit_text = State()
