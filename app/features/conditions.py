@@ -99,6 +99,14 @@ async def channel_condition(c: CallbackQuery):
         for r in conds
     ]
     rows.append(
+        [
+            InlineKeyboardButton(
+                text=tr("➕ Создать для этого канала / группы"),
+                callback_data=f"cond:create:{cid}",
+            )
+        ]
+    )
+    rows.append(
         [InlineKeyboardButton(text=tr("⬅️ Канал"), callback_data=f"channel:open:{cid}")]
     )
     await ui.edit(c, tr("Условие для ") + html.escape(ch["title"]), ui.kb(rows))
@@ -429,12 +437,23 @@ async def join_answer(m: Message, bot: Bot):
 
 
 @router.callback_query(F.data == "cond:create")
+@router.callback_query(F.data.startswith("cond:create:"))
 async def cond_create(c: CallbackQuery, state: FSMContext):
-    await features_editors.wizard_start(state, {"kind": "condition", "step": "name"})
+    target = None
+    if c.data.startswith("cond:create:"):
+        target = int(c.data.split(":")[2])
+        channel = features_channels.template_channel(target, c.from_user.id)
+        if not supports_requests(channel):
+            raise ValueError(
+                tr("Условия вступления доступны для частных каналов и групп.")
+            )
+    await features_editors.wizard_start(
+        state, {"kind": "condition", "step": "name", "target_channel": target}
+    )
     await ui.edit(
         c,
         tr("Как назвать условие? Например: «Подписка на наш канал»."),
-        ui.back("menu:conditions"),
+        ui.back(f"channel:cond:{target}" if target else "menu:conditions"),
     )
     await c.answer()
 
@@ -526,6 +545,13 @@ async def condition_value(m, state, bot, raw, uid, d):
         value = {"question": d["question"], "answer": raw}
     else:
         raise ValueError(tr("Откройте создание условия заново."))
+    target = d.get("target_channel")
+    if target:
+        channel = features_channels.template_channel(target, uid)
+        if not supports_requests(channel):
+            raise ValueError(
+                tr("Условия вступления доступны для частных каналов и групп.")
+            )
     with database.atomic():
         cid = database.db.execute(
             "INSERT INTO conditions(owner_telegram_id,name,created_at) VALUES(?,?,?)",
@@ -535,11 +561,20 @@ async def condition_value(m, state, bot, raw, uid, d):
             "INSERT INTO condition_items(condition_id,item_type,data,position) VALUES(?,?,?,0)",
             (cid, d["item_type"], json.dumps(value, ensure_ascii=False)),
         )
+        if target:
+            database.db.execute(
+                "UPDATE channels SET condition_id=? WHERE id=? AND owner_telegram_id=?",
+                (cid, target, uid),
+            )
     await state.clear()
     await ui.answer(
         m,
-        tr("✅ Условие создано. Выберите его в карточке нужного канала."),
-        reply_markup=ui.back(f"cond:open:{cid}"),
+        tr("✅ Условие создано и выбрано для этого канала / группы.")
+        if target
+        else tr("✅ Условие создано. Выберите его в карточке нужного канала."),
+        reply_markup=ui.back(
+            f"channel:open:{target}" if target else f"cond:open:{cid}"
+        ),
     )
 
 

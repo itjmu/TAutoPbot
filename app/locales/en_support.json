@@ -1,0 +1,13 @@
+{
+  "🆘 Написать Админу 💻": "🆘 Contact Admin 💻",
+  "🔙 Назад": "🔙 Back",
+  "📱Главное Меню": "📱Main Menu",
+  "🆘 Написать Админу 💻\n\nОтправьте сообщения для администратора. Для выхода нажмите «Назад» или «Главное Меню».": "🆘 Contact Admin 💻\n\nSend messages to the administrator. Tap Back or Main Menu to exit.",
+  "Отправьте один ответ или альбом пользователю {user_id}.": "Send one reply or album to user {user_id}.",
+  "Не удалось передать сообщение. Telegram запрещает передачу или получатель недоступен. Можно отправить другое сообщение.": "Could not deliver the message. Telegram restricts delivery or the recipient is unavailable. You can send another message.",
+  "🆘 Обращение от {name}\nID: {user_id}": "🆘 Support request from {name}\nID: {user_id}",
+  "💬 Ответить": "💬 Reply",
+  "✅ Ответ отправлен.": "✅ Reply sent.",
+  "✅ Сообщение отправлено администратору.": "✅ Message sent to the administrator.",
+  "Этот тип сообщения нельзя передать через поддержку. Отправьте другое сообщение.": "This message type cannot be delivered through support. Send another message."
+}

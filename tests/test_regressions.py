@@ -340,6 +340,7 @@ class BotTests(unittest.TestCase):
     def test_playlist_continues_after_failure_and_retry_skips_sent(self):
         info = {
             "backend": "playlist",
+            "media_prepare_version": 2,
             "title": "List",
             "choices": [{"format": "best", "kind": "video"}],
             "entries": [
@@ -364,6 +365,7 @@ class BotTests(unittest.TestCase):
         fail = True
 
         async def worker(action, url, folder, *args):
+            self.assertEqual(args[0]["media_prepare_version"], 2)
             attempted.append(url)
             if fail and url.endswith("/1"):
                 raise ValueError("Unavailable")
@@ -634,7 +636,7 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
             dispatcher.start_polling.assert_awaited_once()
             self.assertEqual(events, ["jobs", "telegram"])
             self.assertIsNone(database.db)
-            self.assertEqual(scheduler.add_job.call_count, 12)
+            self.assertEqual(scheduler.add_job.call_count, 13)
             pin_job = next(
                 call
                 for call in scheduler.add_job.call_args_list
@@ -802,6 +804,47 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     database.one("SELECT status FROM downloads")["status"], "done"
                 )
+                from app.features import support
+
+                context = dp.fsm.get_context(client, chat_id=42, user_id=42)
+                with (
+                    patch.object(ui, "answer", new=AsyncMock()),
+                    patch.object(
+                        support, "deliver", new=AsyncMock(return_value=True)
+                    ) as relay,
+                ):
+                    await dp.feed_update(
+                        client,
+                        Update(
+                            update_id=3,
+                            message=Message(
+                                message_id=3,
+                                date=timeutils.now(),
+                                chat=Chat(id=42, type="private"),
+                                from_user=user,
+                                text="/paysupport",
+                            ),
+                        ),
+                    )
+                    self.assertEqual(
+                        await context.get_state(), support.Support.writing.state
+                    )
+                    await dp.feed_update(
+                        client,
+                        Update(
+                            update_id=4,
+                            message=Message(
+                                message_id=4,
+                                date=timeutils.now(),
+                                chat=Chat(id=42, type="private"),
+                                from_user=user,
+                                text="Support request",
+                            ),
+                        ),
+                    )
+                    relay.assert_awaited_once()
+                    await dp.feed_update(client, update(5, "settings:help"))
+                    self.assertIsNone(await context.get_state())
         finally:
             release.set()
             if download_jobs.active(42):

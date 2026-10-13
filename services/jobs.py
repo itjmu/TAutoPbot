@@ -7,6 +7,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Coroutine
 
 from app.i18n import tr
+from services.telegram_rate import background_traffic
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +44,15 @@ class BackgroundJobs:
         self.admissions.move_to_end(user_id)
         if len(self.admissions) > 8192:
             self.admissions.popitem(last=False)
-        task = asyncio.create_task(factory(), name=f"download:{user_id}")
+
+        async def run():
+            token = background_traffic.set(True)
+            try:
+                return await factory()
+            finally:
+                background_traffic.reset(token)
+
+        task = asyncio.create_task(run(), name=f"download:{user_id}")
         self.tasks[user_id] = task
         self.labels[user_id] = label
         task.add_done_callback(lambda completed: self._finished(user_id, completed))

@@ -328,8 +328,11 @@ def init_extensions():
             "preview_ids TEXT",
             "preview_target INTEGER",
             "protect_content INTEGER DEFAULT 0",
+            "disable_notification INTEGER DEFAULT 0",
             "pin_enabled INTEGER DEFAULT 0",
             "pin_until TEXT",
+            "cover_disabled INTEGER DEFAULT 0",
+            "audio_meta_json TEXT DEFAULT '{}'",
         ],
         "post_targets": [
             "message_thread_id INTEGER",
@@ -406,6 +409,17 @@ def init_extensions():
     CREATE INDEX IF NOT EXISTS idx_approval_delivery ON join_requests(status,approval_delivery_state,approval_retry_at,id);
     CREATE INDEX IF NOT EXISTS idx_published_pin ON published_messages(pin_state,deleted,unpin_at);
     """)
+    existing = {r[1] for r in db.execute("PRAGMA table_info(templates)")}
+    for spec in (
+        "logo_file_id TEXT",
+        "logo_position TEXT DEFAULT 'bottom_right'",
+        "logo_scale INTEGER DEFAULT 20",
+        "logo_x INTEGER",
+        "logo_y INTEGER",
+        "video_cover_file_id TEXT",
+    ):
+        if spec.split()[0] not in existing:
+            db.execute(f"ALTER TABLE templates ADD COLUMN {spec}")
     for key, value in {
         "ref_inviter_days": "0",
         "ref_invitee_days": "0",

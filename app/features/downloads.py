@@ -106,6 +106,8 @@ async def inspect_in_background(bot, uid, url):
         async with DOWNLOAD_SLOTS:
             with tempfile.TemporaryDirectory(prefix="telegram-inspect-") as tmp:
                 info = await downloader.run_download_worker("inspect", url, Path(tmp))
+        # Freeze preparation behavior for later retries of partially sent parts.
+        info["media_prepare_version"] = 2
         did = database.execute(
             "INSERT INTO downloads(owner_id,url,info_json,status,created_at) VALUES(?,?,?,?,?)",
             (uid, url, json.dumps(info, ensure_ascii=False), "ready", timeutils.iso()),
@@ -291,7 +293,13 @@ async def download_in_background(bot, uid, did, index, row, info, control_id=Non
                     ) as tmp:
                         folder = Path(tmp)
                         item_info = (
-                            {"backend": "yt", "choices": [info["choices"][index]]}
+                            {
+                                "backend": "yt",
+                                "choices": [info["choices"][index]],
+                                "media_prepare_version": info.get(
+                                    "media_prepare_version"
+                                ),
+                            }
                             if info["backend"] == "playlist"
                             else info
                         )

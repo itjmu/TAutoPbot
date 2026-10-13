@@ -35,16 +35,29 @@ def write_worker_progress(folder, phase, done=0, total=None):
 
 
 class ProgressMessage:
-    def __init__(self, bot, uid):
+    def __init__(
+        self,
+        bot,
+        uid,
+        *,
+        menu_callback="download:menu",
+        cancel_callback="download:cancel",
+    ):
         self.bot = bot
         self.uid = uid
         self.message_id = None
         self.last = 0
         self.last_text = ""
         self.item = ""
+        self.phase = None
+        self.menu_callback = menu_callback
+        self.cancel_callback = cancel_callback
 
     async def update(self, phase, done=0, total=None, force=False, terminal=False):
+        self.phase = phase
         labels = {
+            "audio_processing": tr("🎵 Редактирование аудио"),
+            "audio_failed": tr("❌ Аудио не подготовлено"),
             "download": tr("Скачивание"),
             "upload": tr("Отправка в Telegram"),
             "processing": tr("Подготовка видео"),
@@ -75,14 +88,14 @@ class ProgressMessage:
                     [
                         InlineKeyboardButton(
                             text=tr("⏹ Остановить"),
-                            callback_data="download:cancel",
+                            callback_data=self.cancel_callback,
                             style="danger",
                         )
                     ],
                     [
                         InlineKeyboardButton(
                             text="🏠 " + tr("Главное меню"),
-                            callback_data="download:menu",
+                            callback_data=self.menu_callback,
                             style="primary",
                         )
                     ],

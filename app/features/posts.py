@@ -100,6 +100,7 @@ async def show_post(
     panel=True,
     button_editor=False,
     reuse_preview=False,
+    confirmation=False,
 ):
     activate(uid)
     p = content.post_owned(pid, uid)
@@ -112,6 +113,8 @@ async def show_post(
         p["status"],
         protect_content=bool(p["protect_content"]),
         pin_enabled=bool(p["pin_enabled"]),
+        confirmation=confirmation,
+        disable_notification=bool(p["disable_notification"]),
         has_video=(
             p["content_type"] == "video"
             or (
@@ -123,6 +126,19 @@ async def show_post(
             )
         ),
     )
+    audio_meta = json.loads(p["audio_meta_json"] or "{}")
+    if (
+        not confirmation
+        and audio_meta.get("editor")
+        and p["status"] in {"draft", "scheduled"}
+    ):
+        for row in controls.inline_keyboard:
+            for button in row:
+                if button.callback_data == f"p:{pid}:replace":
+                    button.callback_data = f"ae:{pid}:replace"
+        controls.inline_keyboard.insert(
+            0, [ui.choice(tr("✍️ Аудиоинструменты"), f"ae:{pid}:tools")]
+        )
     if with_preview and p["status"] in {"draft", "scheduled"}:
         target = next(
             (r for r in targets if r["id"] == p["preview_target"]),
@@ -134,7 +150,11 @@ async def show_post(
             payload = content.render_payload(p, {"id": 0, "default_template_id": None})
         old_ids = content.entity_list(p["preview_ids"])
         payload["protect_content"] = False
-        if reuse_preview and old_ids:
+        # Older album previews have no companion; rebuild them before editing.
+        has_control_message = payload["content_type"] != "album" or len(old_ids) > len(
+            content.entity_list(payload.get("media_json"))
+        )
+        if reuse_preview and old_ids and has_control_message:
             preview = content.build_published_markup(
                 payload["buttons"], pid, preview=True
             )
@@ -175,23 +195,27 @@ async def show_post(
                 if sum(len(row) for row in markup.inline_keyboard) > 100:
                     markup = preview_buttons
                     separate_controls = True
-            album = payload["content_type"] == "album"
             m = await content.send_content(
                 bot,
                 uid,
                 payload,
-                None if album else markup,
+                markup,
             )
+            updated_audio = payload.get("audio_meta_json")
+            if updated_audio and updated_audio != p["audio_meta_json"]:
+                database.execute(
+                    "UPDATE posts SET audio_meta_json=? WHERE id=? AND audio_meta_json=?",
+                    (updated_audio, pid, p["audio_meta_json"]),
+                )
             ids.extend(x.message_id for x in (m if isinstance(m, list) else [m]))
             for mid in ids:
                 ui.note_message(uid, mid)
-            if album:
-                await bot.edit_message_reply_markup(
-                    chat_id=uid,
-                    message_id=ids[-1],
-                    reply_markup=markup,
-                )
             preview_ready = True
+        except content.PartialAlbumError as exc:
+            # Keep the sent media tracked; the fallback panel supplies controls.
+            ids.extend(message.message_id for message in exc.messages)
+            for mid in ids:
+                ui.note_message(uid, mid)
         except (TelegramBadRequest, ValueError) as exc:
             await bot.send_message(
                 uid,
@@ -292,6 +316,11 @@ async def post_action(c: CallbackQuery, state: FSMContext, bot: Bot):
     await state.clear()
     await state.update_data(pid=pid)
     await state.set_state(PostCreate.idle)
+    if action == "options":
+        content.mutable_post(pid, uid)
+        await c.answer()
+        await show_post(bot, uid, pid, reuse_preview=True, confirmation=True)
+        return
     if action == "preview":
         if not post_target_rows(pid):
             await ui.target_picker(c, pid)
@@ -406,6 +435,7 @@ async def post_action(c: CallbackQuery, state: FSMContext, bot: Bot):
             "pinset",
             "pincustom",
             "protect",
+            "sound",
             "time",
         }
         and p["status"] == "scheduled"
@@ -489,54 +519,7 @@ async def post_action(c: CallbackQuery, state: FSMContext, bot: Bot):
         await c.answer(tr("Чужие ссылки удаляются автоматически."))
         return
     elif action == "edit":
-        await ui.edit(
-            c,
-            tr("✏️ Изменения сохраняются в этом черновике."),
-            ui.kb(
-                [
-                    *(
-                        [
-                            [
-                                InlineKeyboardButton(
-                                    text=tr("🖼 Обложка видео"),
-                                    callback_data=f"p:{pid}:cover",
-                                )
-                            ]
-                        ]
-                        if p["content_type"] == "video"
-                        or (
-                            p["content_type"] == "album"
-                            and any(
-                                i["content_type"] == "video"
-                                for i in content.entity_list(p["media_json"])
-                            )
-                        )
-                        else []
-                    ),
-                    [
-                        InlineKeyboardButton(
-                            text=tr("📝 Описание"), callback_data=f"p:{pid}:text"
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text=tr("🖼 Заменить сообщение"),
-                            callback_data=f"p:{pid}:replace",
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text=tr("🔘 Кнопки"), callback_data=f"p:{pid}:buttons"
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text=tr("⬅️ Предпросмотр"), callback_data=f"p:{pid}:preview"
-                        )
-                    ],
-                ]
-            ),
-        )
+        await show_post(bot, uid, pid, reuse_preview=True)
     elif action == "cover":
         items = (
             content.entity_list(p["media_json"]) if p["content_type"] == "album" else []
@@ -567,13 +550,14 @@ async def post_action(c: CallbackQuery, state: FSMContext, bot: Bot):
                 ),
                 ui.back(f"p:{pid}:edit"),
             )
-    elif action == "protect":
+    elif action in {"protect", "sound"}:
+        column = "protect_content" if action == "protect" else "disable_notification"
         database.execute(
-            "UPDATE posts SET protect_content=? WHERE id=?",
-            (int(not p["protect_content"]), pid),
+            f"UPDATE posts SET {column}=? WHERE id=?",
+            (int(not p[column]), pid),
         )
         content.reset_snapshot(pid)
-        await show_post(bot, uid, pid, reuse_preview=True)
+        await show_post(bot, uid, pid, reuse_preview=True, confirmation=True)
     elif action == "pin":
         current = (
             preferences.display(uid, p["pin_until"])
@@ -631,7 +615,7 @@ async def post_action(c: CallbackQuery, state: FSMContext, bot: Bot):
                 ui.choice(tr("Не удалять"), f"p:{pid}:delafter:0"),
             ],
             [ui.choice(tr("Другой интервал"), f"p:{pid}:delcustom")],
-            [ui.choice(tr("Назад"), f"p:{pid}:preview")],
+            [ui.choice(tr("Назад"), f"p:{pid}:options")],
         ]
         await ui.edit(
             c,
@@ -657,7 +641,7 @@ async def post_action(c: CallbackQuery, state: FSMContext, bot: Bot):
             "UPDATE posts SET delete_after_seconds=? WHERE id=?", (seconds, pid)
         )
         content.reset_snapshot(pid)
-        await show_post(bot, uid, pid, False)
+        await show_post(bot, uid, pid, confirmation=True)
     elif action in {"text", "replace"}:
         await state.set_state(
             {
@@ -701,7 +685,7 @@ async def post_action(c: CallbackQuery, state: FSMContext, bot: Bot):
         ]
         rows += [
             [ui.choice(tr("Указать дату и время"), f"p:{pid}:at:custom")],
-            [ui.choice(tr("Назад"), f"p:{pid}:preview")],
+            [ui.choice(tr("Назад"), f"p:{pid}:options")],
         ]
         await ui.edit(
             c,
@@ -983,13 +967,15 @@ async def edit_post_value(m: Message, state: FSMContext, bot: Bot):
             )
         if p["content_type"] == "video" and index is None:
             database.execute(
-                "UPDATE posts SET cover_file_id=? WHERE id=?", (cover, pid)
+                "UPDATE posts SET cover_file_id=?,cover_disabled=? WHERE id=?",
+                (cover, int(cover is None), pid),
             )
         elif p["content_type"] == "album" and index is not None:
             items = content.entity_list(p["media_json"])
             if not 0 <= index < len(items) or items[index]["content_type"] != "video":
                 raise ValueError(tr("Видео не найдено."))
             items[index]["cover_file_id"] = cover
+            items[index]["cover_disabled"] = cover is None
             database.execute(
                 "UPDATE posts SET media_json=? WHERE id=?",
                 (json.dumps(items, ensure_ascii=False), pid),
@@ -1005,6 +991,7 @@ async def edit_post_value(m: Message, state: FSMContext, bot: Bot):
             )
         payload = content.message_payload(m)
         payload.pop("buttons_json", None)
+        payload["cover_disabled"] = 0
         database.execute(
             "UPDATE posts SET " + ",".join(k + "=?" for k in payload) + " WHERE id=?",
             (*payload.values(), pid),
@@ -1076,7 +1063,9 @@ async def edit_post_value(m: Message, state: FSMContext, bot: Bot):
     if stage != PostCreate.schedule.state:
         content.reset_snapshot(pid)
     await state.set_state(PostCreate.idle)
-    await show_post(bot, m.from_user.id, pid)
+    await show_post(
+        bot, m.from_user.id, pid, confirmation=stage == PostCreate.delete.state
+    )
 
 
 def next_occurrence(hhmm):

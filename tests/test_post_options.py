@@ -202,7 +202,7 @@ class PostOptionsTests(unittest.IsolatedAsyncioTestCase):
         labels = [
             b.text
             for r in ui.post_controls(
-                pid, protect_content=True, pin_enabled=True
+                pid, protect_content=True, pin_enabled=True, confirmation=True
             ).inline_keyboard
             for b in r
         ]

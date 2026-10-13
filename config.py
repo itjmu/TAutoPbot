@@ -9,6 +9,7 @@ if os.getenv("DOWNLOAD_WORKER") != "1":
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or "0")
 DB_FILE = os.getenv("DB_FILE", "bot.db")
+BOT_API_BASE = os.getenv("BOT_API_BASE", "").strip().rstrip("/")
 FREE_CHANNEL_LIMIT = 10
 PREMIUM_CHANNEL_LIMIT = 20
 TRIAL_DAYS = 0

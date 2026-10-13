@@ -175,7 +175,15 @@ async def help_menu(c: CallbackQuery):
         + tr(
             "\n🕒 В настройках выберите часовой пояс и язык.\n⏹ /stopdownload останавливает скачивание и отправку.\n📚 Мультипостинг: серия готовых постов с интервалом.\n🏆 Конкурсы: создавайте свои или участвуйте в активных."
         ),
-        ui.back("menu:settings"),
+        ui.kb(
+            [
+                [ui.choice(tr("🆘 Написать Админу 💻"), "support:write")],
+                [
+                    ui.choice(tr("🔙 Назад"), "menu:settings"),
+                    ui.choice(tr("📱Главное Меню"), "menu:main"),
+                ],
+            ]
+        ),
     )
     await c.answer()
 

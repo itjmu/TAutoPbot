@@ -306,7 +306,7 @@ class DownloadTests(unittest.TestCase):
             patch.object(d, "cookies_file", return_value="configured.txt"),
             patch.object(extractor, "find", return_value=instance),
         ):
-            items = d.gallery_items("https://example.com/post")
+            items = d.gallery_items("https://example.com/post", use_cookies=True)
             self.assertEqual(config.get(("extractor",), "cookies"), "configured.txt")
             self.assertFalse(config.get(("extractor",), "cookies-update"))
             self.assertIs(items[0]["cookiejar"], instance.session.cookies)

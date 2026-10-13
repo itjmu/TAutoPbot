@@ -349,6 +349,13 @@ def message_payload(m):
                         }
                     )
     chat = forward_chat(m)
+    audio_meta = {}
+    if typ == "audio":
+        audio_meta = {
+            "title": getattr(m.audio, "title", None),
+            "performer": getattr(m.audio, "performer", None),
+            "filename": getattr(m.audio, "file_name", None),
+        }
     return dict(
         content_type=typ,
         cover_file_id=(
@@ -368,6 +375,7 @@ def message_payload(m):
         source_chat_id=chat.id if chat else None,
         source_message_id=getattr(m.forward_origin, "message_id", None),
         buttons_json=json.dumps(buttons, ensure_ascii=False),
+        audio_meta_json=json.dumps(audio_meta, ensure_ascii=False),
     )
 
 
@@ -383,6 +391,7 @@ def create_draft(uid, payload, targets=()):
         "buttons_json",
         "media_json",
         "cover_file_id",
+        "audio_meta_json",
     ]
     with database.atomic():
         cur = database.db.execute(
@@ -452,6 +461,14 @@ def render_payload(p, ch, template_id=None):
         else None
     )
     if template:
+        if template["logo_file_id"]:
+            d["template_logo"] = {
+                "file_id": template["logo_file_id"],
+                "position": template["logo_position"],
+                "scale": template["logo_scale"],
+                "x": template["logo_x"],
+                "y": template["logo_y"],
+            }
         prefix, pe = parse_template_html(template["before_html"])
         suffix, se = parse_template_html(
             "\n".join(
@@ -504,6 +521,15 @@ def render_payload(p, ch, template_id=None):
                 )
                 items[i] = dict(item, text=txt, caption_entities_json=ents)
         d["media_json"] = items
+    if template and template["video_cover_file_id"]:
+        media = d["media_json"] if d["content_type"] == "album" else [d]
+        for item in media:
+            if (
+                item["content_type"] == "video"
+                and not item.get("cover_file_id")
+                and not item.get("cover_disabled")
+            ):
+                item["cover_file_id"] = template["video_cover_file_id"]
     return d
 
 
@@ -535,9 +561,32 @@ def delivered_payload(payload, index):
 
 
 async def send_content(bot, chat_id, d, reply_markup=None, *, message_thread_id=None):
+    audio_meta = d.get("audio_meta_json") or {}
+    if isinstance(audio_meta, str):
+        audio_meta = json.loads(audio_meta)
+    if (
+        d["content_type"] in {"audio", "document", "voice"}
+        and audio_meta.get("process")
+        and not audio_meta.get("prepared_file_id")
+    ):
+        from services.audio_files import send_prepared
+
+        return await send_prepared(
+            bot, chat_id, d, reply_markup, message_thread_id=message_thread_id
+        )
+    if audio_meta.get("prepared_file_id"):
+        d["file_id"] = audio_meta["prepared_file_id"]
+    if d.get("template_logo") and d["content_type"] in {"photo", "video", "album"}:
+        from services.template_logos import send_with_logo
+
+        return await send_with_logo(
+            bot, chat_id, d, reply_markup, message_thread_id=message_thread_id
+        )
     typ = d["content_type"]
     text = d.get("text") or ""
     protection = {"protect_content": True} if d.get("protect_content") else {}
+    if d.get("disable_notification"):
+        protection["disable_notification"] = True
     if message_thread_id is not None:
         protection["message_thread_id"] = message_thread_id
     if typ == "album":
@@ -622,6 +671,19 @@ async def send_content(bot, chat_id, d, reply_markup=None, *, message_thread_id=
         reply_markup=reply_markup,
         **protection,
         **({"cover": d.get("cover_file_id")} if typ == "video" else {}),
+        **(
+            {
+                key: audio_meta.get("changes", {}).get(key, audio_meta.get(key))
+                for key in ("title", "performer")
+            }
+            if typ == "audio" and audio_meta
+            else {}
+        ),
+        **(
+            {"thumbnail": d["audio_thumbnail"]}
+            if typ == "audio" and d.get("audio_thumbnail")
+            else {}
+        ),
     )
 
 

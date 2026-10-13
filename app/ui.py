@@ -645,7 +645,7 @@ def main_kb():
             ],
             [
                 choice(tr("📢 Автопостинг"), "menu:posts"),
-                choice(tr("🔐 Условия"), "menu:conditions"),
+                choice(tr("✍🎶 Аудио 🎧"), "menu:audio"),
             ],
             [
                 choice(tr("📺 Каналы / группы"), "menu:channels"),
@@ -660,7 +660,14 @@ def main_kb():
 
 
 def post_controls(
-    pid, status="draft", *, has_video=False, protect_content=False, pin_enabled=False
+    pid,
+    status="draft",
+    *,
+    has_video=False,
+    protect_content=False,
+    pin_enabled=False,
+    confirmation=False,
+    disable_notification=False,
 ):
     if status == "uncertain":
         return kb(
@@ -678,6 +685,30 @@ def post_controls(
                 [choice(tr("⬅️ Автопостинг"), "menu:posts")],
             ]
         )
+    if confirmation:
+        return kb(
+            [
+                [
+                    choice(tr("⏳ Отложить"), f"p:{pid}:time"),
+                    choice(tr("🗑 Автоудаление"), f"p:{pid}:delete"),
+                ],
+                [
+                    choice(
+                        ("☑ " if protect_content else "☐ ") + tr("🔒 Без копий"),
+                        f"p:{pid}:protect",
+                    ),
+                    choice(
+                        ("☐ 🔕 " if disable_notification else "☑ 🔔 ")
+                        + tr("Звук уведомления"),
+                        f"p:{pid}:sound",
+                    ),
+                ],
+                [
+                    choice(tr("Назад"), f"p:{pid}:edit"),
+                    choice(tr("🚀 Публикация"), f"p:{pid}:publish"),
+                ],
+            ]
+        )
     editing = [
         choice(tr("📝 Описание"), f"p:{pid}:text"),
         choice(tr("🔄 Заменить"), f"p:{pid}:replace"),
@@ -692,19 +723,13 @@ def post_controls(
             choice(tr("🔘 Кнопки"), f"p:{pid}:buttons"),
         ],
         [
-            choice(tr("🕐 Время"), f"p:{pid}:time"),
+            choice(tr("❌ Отмена"), f"p:{pid}:skip"),
             choice(
                 ("☑ " if pin_enabled else "☐ ") + tr("📌 Закрепить"), f"p:{pid}:pin"
             ),
-            choice(tr("🗑 Автоудаление"), f"p:{pid}:delete"),
-        ],
-        [
-            choice(tr("❌ Отмена"), f"p:{pid}:skip"),
-            choice(
-                ("☑ " if protect_content else "☐ ") + tr("🔒 Без копий"),
-                f"p:{pid}:protect",
+            choice(tr("➡️ Далее"), f"p:{pid}:options").model_copy(
+                update={"style": "success"}
             ),
-            choice(tr("🚀 Публикация"), f"p:{pid}:publish"),
         ],
     ]
     return InlineKeyboardMarkup(

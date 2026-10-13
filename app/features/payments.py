@@ -1,11 +1,9 @@
 """features / payments components."""
 
 import html
-import os
 import secrets
 
 from aiogram import Bot, F, Router
-from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
@@ -367,14 +365,4 @@ async def successful_payment(m: Message, bot: Bot):
     await m.answer(
         tr("✅ Premium продлён на {v0} дней.", v0=row["days"]),
         reply_markup=ui.main_kb(),
-    )
-
-
-@router.message(Command("paysupport"))
-async def payment_support(m: Message):
-    contact = os.getenv("SUPPORT_CONTACT", "").strip()
-    await m.answer(
-        tr("Поддержка платежей: ")
-        + html.escape(contact or tr("администратор Telegram ID {v0}", v0=ADMIN_ID))
-        + tr(". Укажите ваш ID и дату платежа.")
     )

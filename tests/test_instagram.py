@@ -22,14 +22,17 @@ class InstagramTests(unittest.TestCase):
                 patch.object(downloader, "deno_path", return_value=None),
             ):
                 options = downloader.ydl_options(
-                    folder, "https://www.instagram.com/p/test/"
+                    folder, "https://www.instagram.com/p/test/", use_cookies=True
                 )
                 self.assertEqual(options["cookiefile"], str(cookies))
                 for url in (
                     "https://example.com/video",
                     "https://instagram.com.example.com/p/test/",
                 ):
-                    self.assertNotIn("cookiefile", downloader.ydl_options(folder, url))
+                    self.assertNotIn(
+                        "cookiefile",
+                        downloader.ydl_options(folder, url, use_cookies=True),
+                    )
 
     def test_missing_cookie_file_is_reported(self):
         with (
@@ -41,7 +44,9 @@ class InstagramTests(unittest.TestCase):
             patch.object(downloader, "ffmpeg_path", return_value="ffmpeg"),
         ):
             with self.assertRaisesRegex(ValueError, "INSTAGRAM_COOKIES_FILE"):
-                downloader.ydl_options(Path(directory), "https://instagram.com/p/test/")
+                downloader.ydl_options(
+                    Path(directory), "https://instagram.com/p/test/", use_cookies=True
+                )
 
     def test_empty_response_has_actionable_message(self):
         error = RuntimeError(

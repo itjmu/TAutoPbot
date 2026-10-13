@@ -584,6 +584,61 @@ async def template_list(c: CallbackQuery):
     await c.answer()
 
 
+async def logo_placement_panel(c, template):
+    from services.template_logos import coordinates
+
+    tid = template["id"]
+    x, y = coordinates(
+        {
+            "position": template["logo_position"],
+            "x": template["logo_x"],
+            "y": template["logo_y"],
+        }
+    )
+    rows = [
+        [
+            ui.choice("⬅️", f"tpl:{tid}:logo_move_left"),
+            ui.choice("⬆️", f"tpl:{tid}:logo_move_up"),
+            ui.choice("➡️", f"tpl:{tid}:logo_move_right"),
+        ],
+        [
+            ui.choice("➖", f"tpl:{tid}:logo_smaller"),
+            ui.choice("⬇️", f"tpl:{tid}:logo_move_down"),
+            ui.choice("➕", f"tpl:{tid}:logo_larger"),
+        ],
+    ]
+    rows += ui.button_grid(
+        [
+            ui.choice(label, f"tpl:{tid}:logo_at_{position}")
+            for position, label in [
+                ("top_left", tr("слева вверху")),
+                ("top_right", tr("справа вверху")),
+                ("bottom_left", tr("слева внизу")),
+                ("bottom_right", tr("справа внизу")),
+                ("center", tr("по центру")),
+            ]
+        ],
+        2,
+    )
+    rows += [
+        [
+            ui.choice(tr("🎯 Координаты"), f"tpl:{tid}:logo_coordinates"),
+            ui.choice(tr("↔️ Размер"), f"tpl:{tid}:logo_scale"),
+        ],
+        [ui.choice(tr("⬅️ Назад"), f"tpl:{tid}:open")],
+    ]
+    await ui.edit(
+        c,
+        tr(
+            "Логотип: X={x}%, Y={y}%, размер={size}%. Стрелки двигают на 5%; −/+ меняют размер.",
+            x=x,
+            y=y,
+            size=template["logo_scale"],
+        ),
+        ui.kb(rows),
+    )
+
+
 @router.callback_query(F.data.startswith("tpl:"))
 async def template_action(c: CallbackQuery, state: FSMContext):
     _, tid, action = c.data.split(":")
@@ -594,11 +649,96 @@ async def template_action(c: CallbackQuery, state: FSMContext):
     if not t:
         raise ValueError(tr("Шаблон не найден."))
     cid = t["channel_id"]
-    if action == "default":
+    if action in {"default", "automatic"}:
+        ch = features_channels.template_channel(cid, c.from_user.id)
+        enabled = action == "default" or ch["default_template_id"] != tid
         database.execute(
-            "UPDATE channels SET default_template_id=? WHERE id=?", (tid, cid)
+            "UPDATE channels SET default_template_id=? WHERE id=?",
+            (tid if enabled else None, cid),
         )
-        await c.answer(tr("Используется по умолчанию."))
+        action = "open"
+    if action in {"logo_clear", "video_cover_clear"}:
+        field = "logo_file_id" if action == "logo_clear" else "video_cover_file_id"
+        database.execute(f"UPDATE templates SET {field}=NULL WHERE id=?", (tid,))
+        action = "open"
+    if action.startswith("logo_move_"):
+        from services.template_logos import coordinates
+
+        x, y = coordinates(
+            {"position": t["logo_position"], "x": t["logo_x"], "y": t["logo_y"]}
+        )
+        movements = {"left": (-5, 0), "right": (5, 0), "up": (0, -5), "down": (0, 5)}
+        direction = action.removeprefix("logo_move_")
+        if direction not in movements:
+            raise ValueError(tr("Неизвестное действие."))
+        dx, dy = movements[direction]
+        database.execute(
+            "UPDATE templates SET logo_x=?,logo_y=? WHERE id=?",
+            (max(0, min(100, x + dx)), max(0, min(100, y + dy)), tid),
+        )
+        action = "logo_position"
+    if action.startswith("logo_at_"):
+        from services.template_logos import POSITIONS
+
+        position = action.removeprefix("logo_at_")
+        if position not in POSITIONS:
+            raise ValueError(tr("Неизвестное действие."))
+        database.execute(
+            "UPDATE templates SET logo_position=?,logo_x=NULL,logo_y=NULL WHERE id=?",
+            (position, tid),
+        )
+        action = "logo_position"
+    if action in {"logo_smaller", "logo_larger"}:
+        size = max(
+            1, min(100, t["logo_scale"] + (5 if action == "logo_larger" else -5))
+        )
+        database.execute("UPDATE templates SET logo_scale=? WHERE id=?", (size, tid))
+        action = "logo_position"
+    if action == "logo_position":
+        await state.clear()
+        await logo_placement_panel(
+            c, database.one("SELECT * FROM templates WHERE id=?", (tid,))
+        )
+        await c.answer()
+        return
+    if action in {"logo_scale", "logo_coordinates"}:
+        await wizard_start(state, {"kind": action, "tid": tid, "step": "value"})
+        await ui.edit(
+            c,
+            tr("Введите размер логотипа от 1 до 100 (%).")
+            if action == "logo_scale"
+            else tr(
+                "Введите X Y от 0 до 100 (%). Например: 50 50 — центр, 100 100 — справа внизу."
+            ),
+            ui.back(f"tpl:{tid}:logo_position"),
+        )
+        await c.answer()
+        return
+    if action == "video_cover":
+        await wizard_start(
+            state, {"kind": "template_cover", "tid": tid, "step": "value"}
+        )
+        await ui.edit(
+            c,
+            tr(
+                "Отправьте обложку для видео как фото. Логотип шаблона будет добавлен только на обложку."
+            ),
+            ui.back(f"tpl:{tid}:open"),
+        )
+        await c.answer()
+        return
+    if action == "logo":
+        await wizard_start(
+            state, {"kind": "template_logo", "tid": tid, "step": "value"}
+        )
+        await ui.edit(
+            c,
+            tr(
+                "Отправьте логотип: фото или PNG/JPEG файлом до 2 МБ. Для прозрачности отправьте PNG как файл."
+            ),
+            ui.back(f"tpl:{tid}:open"),
+        )
+        await c.answer()
         return
     if action == "delete":
         with database.atomic():
@@ -618,6 +758,9 @@ async def template_action(c: CallbackQuery, state: FSMContext):
         await c.answer()
         return
     if action == "open":
+        await state.clear()
+        t = database.one("SELECT * FROM templates WHERE id=?", (tid,))
+        ch = features_channels.template_channel(cid, c.from_user.id)
         rows = ui.button_grid(
             [
                 ui.choice(label, f"tpl:{tid}:{field}")
@@ -627,7 +770,18 @@ async def template_action(c: CallbackQuery, state: FSMContext):
                     ("signature_html", tr("✍️ Подпись")),
                     ("buttons_json", tr("🔘 Кнопки")),
                     ("name", tr("✏️ Название")),
-                    ("default", tr("⭐ По умолчанию")),
+                    (
+                        "automatic",
+                        tr("☑ Автоматически")
+                        if ch["default_template_id"] == tid
+                        else tr("☐ Автоматически"),
+                    ),
+                    ("logo", tr("🖼 Логотип")),
+                    ("logo_clear", tr("🧹 Убрать логотип")),
+                    ("logo_position", tr("📍 Положение")),
+                    ("logo_scale", tr("↔️ Размер")),
+                    ("video_cover", tr("🖼 Обложка видео")),
+                    ("video_cover_clear", tr("🧹 Убрать обложку")),
                 ]
             ],
             2,
@@ -639,6 +793,37 @@ async def template_action(c: CallbackQuery, state: FSMContext):
             ]
         )
         summaries = []
+        positions = {
+            "bottom_right": tr("справа внизу"),
+            "bottom_left": tr("слева внизу"),
+            "top_left": tr("слева вверху"),
+            "top_right": tr("справа вверху"),
+            "center": tr("по центру"),
+        }
+        summaries.append(
+            tr("Логотип")
+            + ": "
+            + (
+                (
+                    f"X={t['logo_x']}%, Y={t['logo_y']}%"
+                    if t["logo_x"] is not None
+                    else positions.get(t["logo_position"], positions["bottom_right"])
+                )
+                + f" · {t['logo_scale']}%"
+                if t["logo_file_id"]
+                else tr("не задано")
+            )
+        )
+        summaries.append(
+            tr("🖼 Обложка видео")
+            + ": "
+            + (tr("задана") if t["video_cover_file_id"] else tr("не задано"))
+        )
+        summaries.append(
+            tr("Автоматически")
+            + ": "
+            + (tr("включено") if ch["default_template_id"] == tid else tr("выключено"))
+        )
         for key, label in [
             ("before_html", tr("До")),
             ("after_html", tr("После")),
@@ -732,6 +917,43 @@ async def guided_value(m, state, bot, raw, uid):
     kind = d.get("kind")
     step = d.get("step")
     raw = raw.strip()
+    if kind in {"logo_scale", "logo_coordinates"}:
+        if not database.one(
+            "SELECT 1 FROM templates WHERE id=? AND owner_id=?", (d["tid"], uid)
+        ):
+            raise ValueError(tr("Шаблон не найден."))
+        try:
+            numbers = [int(value) for value in raw.split()]
+        except ValueError:
+            numbers = []
+        if kind == "logo_scale":
+            if len(numbers) != 1 or not 1 <= numbers[0] <= 100:
+                raise ValueError(tr("Введите размер логотипа от 1 до 100 (%)."))
+            database.execute(
+                "UPDATE templates SET logo_scale=? WHERE id=?", (numbers[0], d["tid"])
+            )
+        else:
+            if len(numbers) != 2 or not all(0 <= value <= 100 for value in numbers):
+                raise ValueError(
+                    tr(
+                        "Введите X Y от 0 до 100 (%). Например: 50 50 — центр, 100 100 — справа внизу."
+                    )
+                )
+            database.execute(
+                "UPDATE templates SET logo_x=?,logo_y=? WHERE id=?",
+                (*numbers, d["tid"]),
+            )
+        await state.clear()
+        await ui.answer(
+            m,
+            tr("✅ Сохранено."),
+            reply_markup=ui.back(f"tpl:{d['tid']}:logo_position"),
+        )
+        return
+    if kind == "template_cover":
+        raise ValueError(tr("Отправьте обложку для видео как фото."))
+    if kind == "template_logo":
+        raise ValueError(tr("Отправьте логотип как фото или PNG/JPEG файл."))
     if kind == "buttons_bulk":
         existing = button_document(uid, d["scope"], d["oid"])
         buttons = parse_bulk_buttons(raw, existing, d["placement"])
@@ -1008,6 +1230,57 @@ def end_of_day(raw, uid):
         except ValueError:
             pass
     raise ValueError(tr("Введите дату ДД.ММ.ГГГГ, например 31.12.2026."))
+
+
+@router.message(GuidedInput.value, F.photo | F.document)
+async def template_logo_input(m: Message, state: FSMContext):
+    data = await state.get_data()
+    if data.get("kind") not in {"template_logo", "template_cover"}:
+        await ui.answer(
+            m, tr("Здесь ожидается текст. Отправьте текст или нажмите /cancel.")
+        )
+        return
+    tid = data["tid"]
+    if not database.one(
+        "SELECT 1 FROM templates WHERE id=? AND owner_id=?", (tid, m.from_user.id)
+    ):
+        raise ValueError(tr("Шаблон не найден."))
+    if data["kind"] == "template_cover":
+        if not m.photo:
+            raise ValueError(tr("Отправьте обложку для видео как фото."))
+        if m.photo[-1].file_size and m.photo[-1].file_size > 20 * 1024 * 1024:
+            raise ValueError(tr("Логотип — до 2 МБ; фото или обложка — до 20 МБ."))
+        if not accounts.use_daily(m.from_user.id, "cover"):
+            raise ValueError(
+                tr(
+                    "Дневной лимит замены обложек исчерпан. Лимит обновится в 00:00 UTC."
+                )
+            )
+        database.execute(
+            "UPDATE templates SET video_cover_file_id=? WHERE id=?",
+            (m.photo[-1].file_id, tid),
+        )
+        await state.clear()
+        await ui.answer(
+            m,
+            tr("✅ Обложка видео сохранена."),
+            reply_markup=ui.back(f"tpl:{tid}:open"),
+        )
+        return
+    logo = m.photo[-1] if m.photo else m.document
+    if m.document and m.document.mime_type not in {"image/png", "image/jpeg"}:
+        raise ValueError(tr("Логотип: фото или PNG/JPEG файл."))
+    if not logo.file_size or logo.file_size > 2 * 1024 * 1024:
+        raise ValueError(tr("Логотип должен быть не больше 2 МБ."))
+    database.execute(
+        "UPDATE templates SET logo_file_id=? WHERE id=?", (logo.file_id, tid)
+    )
+    await state.clear()
+    await ui.answer(
+        m,
+        tr("✅ Логотип сохранён для фотографий и обложек видео, включая альбомы."),
+        reply_markup=ui.back(f"tpl:{tid}:open"),
+    )
 
 
 @router.message(GuidedInput.value, F.text, ~F.text.startswith("/"))

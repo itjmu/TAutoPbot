@@ -26,6 +26,16 @@ class ConditionCreate(StatesGroup):
     question = State()
 
 
+class AudioEdit(StatesGroup):
+    content = State()
+    value = State()
+
+
+class AudioUtility(StatesGroup):
+    idle = State()
+    value = State()
+
+
 class SourceCreate(StatesGroup):
     source = State()
 

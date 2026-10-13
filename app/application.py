@@ -4,6 +4,8 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -12,9 +14,11 @@ from app import scheduler as scheduled_jobs
 from app import storage as storage
 from app import ui
 from app.features import sources as features_sources
+from app.features import support
+from app.features.audio_utility import audio_jobs
 from app.i18n import tr
 from app.routing import build_router
-from config import BOT_TOKEN, DB_FILE, validate_config
+from config import BOT_API_BASE, BOT_TOKEN, DB_FILE, validate_config
 from services import broadcasts, contests
 from services.event_isolation import EventIsolation
 from services.jobs import download_jobs
@@ -52,7 +56,16 @@ async def run_application():
     database.execute(
         "UPDATE downloads SET status='failed',error='Перезапуск бота; выберите формат ещё раз' WHERE status='running'"
     )
-    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    session = (
+        AiohttpSession(api=TelegramAPIServer.from_base(BOT_API_BASE, is_local=True))
+        if BOT_API_BASE
+        else None
+    )
+    bot = Bot(
+        BOT_TOKEN,
+        session=session,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     limiter = TelegramRateLimit()
     bot.session.middleware(limiter)
     running = RuntimeTasks()
@@ -67,6 +80,7 @@ async def run_application():
         (contests.closing_tick, 2),
         (broadcasts.tick, 2),
         (features_sources.flush_albums, 2),
+        (support.flush_albums, 2),
         (ui.cleanup_tick, 5),
         (scheduled_jobs.scheduler_delete, 30),
         (scheduled_jobs.scheduler_pins, 10),
@@ -108,6 +122,7 @@ async def run_application():
             scheduler.shutdown(wait=False)
         await contests.close_workers()
         await download_jobs.close()
+        await audio_jobs.close()
         await ui.close_cleanup()
         await dp.storage.close()
         await bot.session.close()

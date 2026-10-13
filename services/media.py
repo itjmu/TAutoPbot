@@ -58,6 +58,7 @@ def probe(path, executable, *, codecs=False):
         if codecs:
             result.update(
                 codec=data.get("codec"),
+                audio_codec=data.get("audio_codec"),
                 pix_fmt=(data.get("pix_fmt") or "").split("(", 1)[0].strip(),
             )
         return result
@@ -65,7 +66,7 @@ def probe(path, executable, *, codecs=False):
         frames.close()
 
 
-def prepare_video(path, executable, limit):
+def prepare_video(path, executable, limit, *, fast=True):
     """Prepare H.264/AAC MP4 without cropping; every returned part is size-checked."""
     meta = probe(path, executable, codecs=True)
     duration = meta["duration"]
@@ -77,6 +78,61 @@ def prepare_video(path, executable, limit):
     output = path.parent / (path.stem + "_telegram")
     output.mkdir(exist_ok=True)
     small_source = path.stat().st_size <= limit
+    compatible = (
+        meta["codec"] == "h264"
+        and meta["pix_fmt"] == "yuv420p"
+        and meta.get("audio_codec") in {None, "aac"}
+    )
+    if fast and compatible and small_source and path.suffix.lower() == ".mp4":
+        return [path]  # Reuse the original bytes; Telegram can deliver it directly.
+    if fast and compatible and not small_source:
+        # Segment on existing keyframes. Every part must fit; otherwise retain
+        # the established encoding fallback (e.g. a single oversized GOP).
+        lossless = output / "lossless"
+        lossless.mkdir(exist_ok=True)
+        length = max(0.5, duration * limit / path.stat().st_size * 0.65)
+        for _ in range(3):
+            for old in lossless.glob("part_*.mp4"):
+                old.unlink()
+            try:
+                run_ffmpeg(
+                    executable,
+                    [
+                        "-protocol_whitelist",
+                        "file,pipe",
+                        "-i",
+                        str(path),
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "0:a:0?",
+                        "-c",
+                        "copy",
+                        "-f",
+                        "segment",
+                        "-segment_time",
+                        str(length),
+                        "-reset_timestamps",
+                        "1",
+                        "-segment_format_options",
+                        "movflags=+faststart",
+                        str(lossless / "part_%04d.mp4"),
+                    ],
+                )
+                parts = sorted(lossless.glob("part_*.mp4"))
+                if len(parts) > 1 and all(
+                    0 < part.stat().st_size <= limit for part in parts
+                ):
+                    durations = [probe(part, executable)["duration"] for part in parts]
+                    if all(
+                        value > 0 and math.isfinite(value) for value in durations
+                    ) and abs(sum(durations) - duration) <= max(0.5, len(parts) * 0.1):
+                        return parts
+            except ValueError:
+                break
+            length /= 2
+        for old in lossless.glob("part_*.mp4"):
+            old.unlink()
     if small_source and meta["codec"] == "h264" and meta["pix_fmt"] == "yuv420p":
         target = output / "part_0001.mp4"
         try:

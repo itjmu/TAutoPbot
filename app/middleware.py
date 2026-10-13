@@ -82,6 +82,9 @@ class Guard(BaseMiddleware):
                     "contest:",
                     "broadcast:",
                     "live:",
+                    "ae:",
+                    "au:",
+                    "aujob:",
                 )
             )
         ):

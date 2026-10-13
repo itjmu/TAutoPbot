@@ -13,6 +13,7 @@ import sys
 import traceback
 import urllib.request
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -39,6 +40,8 @@ DOWNLOAD_TOTAL = int(os.getenv("DOWNLOAD_TOTAL_BYTES", "4000000000"))
 
 
 DOWNLOAD_SOURCE_LIMIT = int(os.getenv("DOWNLOAD_SOURCE_BYTES", "1000000000"))
+_site_cookie_file = ContextVar("download_site_cookie_file", default=None)
+_access_warnings = ContextVar("download_access_warnings", default=None)
 
 
 def telegram_url(url):
@@ -145,6 +148,18 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
 
 def open_media_url(url, headers=None, cookiejar=None):
     validate_download_url(url)
+    if cookiejar is None and _site_cookie_file.get():
+        from http.cookiejar import MozillaCookieJar
+
+        cookiejar = MozillaCookieJar(_site_cookie_file.get())
+        try:
+            cookiejar.load(ignore_discard=True)
+        except Exception as exc:
+            raise DownloadConfigError(
+                tr(
+                    "Не удалось прочитать cookies. Нужен действующий файл в формате Netscape."
+                )
+            ) from exc
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
         SafeRedirect(),
@@ -187,7 +202,13 @@ class QuietYDL:
         pass
 
     def warning(self, msg):
-        pass
+        warnings = _access_warnings.get()
+        if warnings is not None and (
+            len(warnings) < 8 or temporary_access_failure(str(msg))
+        ):
+            if len(warnings) == 8:
+                warnings.pop()
+            warnings.append(str(msg))
 
     def error(self, msg):
         pass
@@ -200,6 +221,107 @@ def instagram_url(url):
 
 class DownloadConfigError(ValueError):
     """Administrator configuration errors must not be hidden by fallbacks."""
+
+
+class DownloadInspectionError(ValueError):
+    """Keep both extractor causes for access decisions without exposing them in UI."""
+
+    def __init__(self, message, *errors):
+        super().__init__(message)
+        self.errors = errors
+
+
+def temporary_access_failure(text):
+    text = text.lower()
+    return bool(
+        re.search(r"\b(?:http(?: error)?|status(?: code)?)[: ]+429\b", text)
+    ) or any(
+        marker in text
+        for marker in (
+            "too many requests",
+            "rate-limit",
+            "rate limit",
+            "timed out",
+            "timeout",
+            "connection reset",
+            "connection refused",
+            "network is unreachable",
+            "unable to resolve",
+            "temporary failure in name resolution",
+            "getaddrinfo failed",
+        )
+    )
+
+
+def needs_site_cookies(url, error):
+    errors, pending, seen = [], [error], set()
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        errors.append(item)
+        pending.extend(getattr(item, "errors", ()))
+        if item.__cause__ is not None:
+            pending.append(item.__cause__)
+    text = "\n".join(str(item).lower() for item in errors)
+    if any(
+        isinstance(item, (DownloadConfigError, TimeoutError, ConnectionError))
+        for item in errors
+    ):
+        return False
+    if temporary_access_failure(text):
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "login required",
+            "login_required",
+            "log in",
+            "sign in",
+            "authentication required",
+            "requires authentication",
+            "private video",
+            "not a bot",
+            "captcha",
+            "loginrequired",
+        )
+    ) or (instagram_url(url) and "empty media response" in text)
+
+
+def public_first(url, operation):
+    """One anonymous operation, then at most one configured-site login attempt."""
+    token = _site_cookie_file.set(None)
+    warnings_token = _access_warnings.set([])
+    try:
+        try:
+            return operation()
+        except Exception as exc:
+            warnings = tuple(
+                RuntimeError(message) for message in _access_warnings.get()
+            )
+            combined = DownloadInspectionError(str(exc), exc, *warnings)
+            if not needs_site_cookies(url, combined):
+                for warning in warnings:
+                    if (
+                        re.search(
+                            r"\b(?:http(?: error)?|status(?: code)?)[: ]+429\b",
+                            str(warning).lower(),
+                        )
+                        or "too many requests" in str(warning).lower()
+                    ):
+                        raise ValueError(download_error(url, warning)) from exc
+                raise
+            if config_error := os.getenv("DOWNLOAD_COOKIE_CONFIG_ERROR"):
+                raise DownloadConfigError(config_error) from exc
+            configured = cookies_file(url)
+            if not configured:
+                raise
+            _site_cookie_file.set(configured)
+            return operation()
+    finally:
+        _access_warnings.reset(warnings_token)
+        _site_cookie_file.reset(token)
 
 
 def cookies_file(url):
@@ -313,6 +435,10 @@ def download_error(url, error):
         x in lower for x in ("too many requests", "rate-limit", "rate limit")
     ) or re.search(r"\b(?:http(?: error)?|status(?: code)?)[: ]+429\b", lower):
         return tr("Сайт временно ограничил запросы. Подождите и попробуйте снова.")
+    if "not a bot" in lower and ("confirm" in lower or "sign in" in lower):
+        return tr(
+            "Сайт просит подтвердить, что скачивание выполняет человек. Это проверка соединения бота, а не обязательно закрытая публикация. Попробуйте позже; администратору нужно проверить доступ к сайту."
+        )
     if instagram_url(url) and any(
         marker in message.lower()
         for marker in (
@@ -424,7 +550,7 @@ def youtube_session(opts):
         yield ydl
 
 
-def ydl_options(folder, url=""):
+def ydl_options(folder, url="", *, use_cookies=False):
     def progress(d):
         write_worker_progress(
             folder,
@@ -459,7 +585,7 @@ def ydl_options(folder, url=""):
         "proxy": "",
         "remote_components": [],
     }
-    cookies = cookies_file(url)
+    cookies = cookies_file(url) if use_cookies else _site_cookie_file.get()
     if cookies:
         opts["cookiefile"] = cookies
     deno = deno_path()
@@ -594,7 +720,7 @@ def playlist_format(info, selected):
     )
 
 
-def gallery_items(url):
+def gallery_items(url, *, use_cookies=False):
     from gallery_dl import config, extractor
 
     # Only explicitly configured cookie files; no browser sessions or user config.
@@ -602,7 +728,11 @@ def gallery_items(url):
     config.set(("extractor",), "retries", 1)
     config.set(("extractor",), "timeout", 20)
     config.set(("extractor",), "proxy", None)
-    config.set(("extractor",), "cookies", cookies_file(url))
+    config.set(
+        ("extractor",),
+        "cookies",
+        cookies_file(url) if use_cookies else _site_cookie_file.get(),
+    )
     config.set(("extractor",), "cookies-update", False)
     config.set(("extractor",), "input", False)
     instance = extractor.find(url)
@@ -763,7 +893,12 @@ def inspect_download(url, folder):
         try:
             items = gallery_items(url)
         except Exception as image_error:
-            raise ValueError(download_error(url, video_error)) from image_error
+            reason = (
+                image_error if needs_site_cookies(url, image_error) else video_error
+            )
+            raise DownloadInspectionError(
+                download_error(url, reason), video_error, image_error
+            ) from image_error
         return {
             "backend": "gallery",
             "video_count": sum(
@@ -933,15 +1068,21 @@ def download_worker_main():
         url = resolve_download_url(url)
         request["url"] = url
         if request["action"] == "inspect":
-            result = inspect_download(url, folder)
+            result = public_first(url, lambda: inspect_download(url, folder))
         else:
-            files = download_files(request, folder)
+            files = public_first(url, lambda: download_files(request, folder))
             prepared = []
             metadata = {}
             for path in files:
                 if path.suffix.lower() in VIDEO_EXTENSIONS:
                     write_worker_progress(folder, "processing")
-                    for part in prepare_video(path, ffmpeg_path(), DOWNLOAD_LIMIT):
+                    for part in prepare_video(
+                        path,
+                        ffmpeg_path(),
+                        DOWNLOAD_LIMIT,
+                        fast=(request.get("info") or {}).get("media_prepare_version")
+                        == 2,
+                    ):
                         prepared.append(part)
                         metadata[str(part.resolve())] = upload_metadata(
                             part, ffmpeg_path()
@@ -1034,7 +1175,12 @@ async def run_download_worker(action, url, folder, info=None, selection=0):
         PYTHONIOENCODING="utf-8",
         DOWNLOAD_WORKER="1",
     )
-    selected_cookies = cookies_file(url)
+    try:
+        selected_cookies = cookies_file(url)
+    except DownloadConfigError as exc:
+        # Public links must not fail because a configured account file is missing.
+        selected_cookies = None
+        env["DOWNLOAD_COOKIE_CONFIG_ERROR"] = str(exc)
     if selected_cookies:
         env["DOWNLOAD_COOKIES_FILE"] = str(selected_cookies)
     command, working_directory = worker_command(folder, env)

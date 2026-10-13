@@ -8,7 +8,7 @@ language_context = ContextVar("language", default="ru")
 _path = Path(__file__).with_name("locales")
 CATALOGS = {language: {} for language in ("en", "kk")}
 for language, catalog in CATALOGS.items():
-    for suffix in ("", "_launch"):
+    for suffix in ("", "_launch", "_support"):
         path = _path / (language + suffix + ".json")
         if path.exists():
             catalog.update(json.loads(path.read_text(encoding="utf-8")))

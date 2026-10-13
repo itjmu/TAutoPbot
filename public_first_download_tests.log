@@ -1,0 +1,61 @@
+..............Executing <Task pending name='Task-72' coro=<AudioProcessingTests.test_real_mp3_m4a_tags_cover_and_unchanged_audio_packets() running at C:\Users\User\Desktop\Telegram bots\TAutoPbot\tests\test_audio_editor.py:377> wait_for=<Future pending cb=[Task.task_wakeup()] created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\base_events.py:181] created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\runners.py:101> took 0.583 seconds
+Executing <Task pending name='Task-72' coro=<AudioProcessingTests.test_real_mp3_m4a_tags_cover_and_unchanged_audio_packets() running at C:\Users\User\Desktop\Telegram bots\TAutoPbot\tests\test_audio_editor.py:377> wait_for=<Future pending cb=[Task.task_wakeup()] created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\base_events.py:181] created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\runners.py:101> took 0.244 seconds
+Executing <Task finished name='Task-72' coro=<AudioProcessingTests.test_real_mp3_m4a_tags_cover_and_unchanged_audio_packets() done, defined at C:\Users\User\Desktop\Telegram bots\TAutoPbot\tests\test_audio_editor.py:329> result=None created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\runners.py:101> took 0.157 seconds
+.....Executing <Task pending name='Task-189' coro=<RealConversionTests.test_full_preparation_download_trim_all_tags_cover_and_upload() running at C:\Users\User\Desktop\Telegram bots\TAutoPbot\tests\test_audio_utility.py:620> wait_for=<Future pending cb=[Task.task_wakeup()] created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\base_events.py:181] created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\runners.py:101> took 0.168 seconds
+...................................Contest tick failed: 1
+Traceback (most recent call last):
+  File "C:\Users\User\Desktop\Telegram bots\TAutoPbot\services\contests.py", line 780, in process_contest
+    sent = await content.send_content(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        bot, target["telegram_chat_id"], publication(row), markup
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\unittest\mock.py", line 2336, in _execute_mock_call
+    raise result
+RuntimeError: connection lost
+......................................................................Contest delivery failed
+Traceback (most recent call last):
+  File "C:\Users\User\Desktop\Telegram bots\TAutoPbot\services\contests.py", line 622, in deliver
+    await method(
+    ...<5 lines>...
+    )
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\unittest\mock.py", line 2336, in _execute_mock_call
+    raise result
+aiogram.exceptions.TelegramNetworkError: HTTP Client says - connection lost
+.............................................Contest delivery failed
+Traceback (most recent call last):
+  File "C:\Users\User\Desktop\Telegram bots\TAutoPbot\services\contests.py", line 633, in deliver
+    await bot.send_message(item["recipient"], text, parse_mode=parse_mode)
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\unittest\mock.py", line 2327, in _execute_mock_call
+    raise effect
+aiogram.exceptions.TelegramNetworkError: HTTP Client says - connection lost
+Contest delivery failed
+Traceback (most recent call last):
+  File "C:\Users\User\Desktop\Telegram bots\TAutoPbot\services\contests.py", line 633, in deliver
+    await bot.send_message(item["recipient"], text, parse_mode=parse_mode)
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\unittest\mock.py", line 2327, in _execute_mock_call
+    raise effect
+  File "C:\Users\User\Desktop\Telegram bots\TAutoPbot\services\contests.py", line 633, in deliver
+    await bot.send_message(item["recipient"], text, parse_mode=parse_mode)
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\unittest\mock.py", line 2327, in _execute_mock_call
+    raise effect
+aiogram.exceptions.TelegramNetworkError: HTTP Client says - connection lost
+.............................Pin job will retry for publication 1
+......................2026-10-12 23:37:27,053 | INFO | app.application | Started v4.0.0 @offline
+...........................2026-10-12 23:37:27,929 | INFO | aiogram.event | Update id=1 is handled. Duration 147 ms by bot id=12345
+2026-10-12 23:37:27,930 | WARNING | asyncio | Executing <Task pending name='Task-1491' coro=<RoutingTests.test_same_user_can_open_menu_during_download() running at C:\Users\User\Desktop\Telegram bots\TAutoPbot\tests\test_regressions.py:796> wait_for=<Future pending cb=[Task.task_wakeup()] created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\base_events.py:181] created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\runners.py:101> took 0.146 seconds
+2026-10-12 23:37:27,941 | INFO | aiogram.event | Update id=2 is handled. Duration 7 ms by bot id=12345
+...........2026-10-12 23:37:28,891 | WARNING | asyncio | Executing <Task finished name='Task-1552' coro=<ResourceFixTests.test_completed_locks_are_released_and_waiters_remain_serial() done, defined at C:\Users\User\Desktop\Telegram bots\TAutoPbot\tests\test_scale_fixes.py:326> result=None created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\runners.py:101> took 0.264 seconds
+................2026-10-12 23:37:30,135 | WARNING | asyncio | Executing <Task pending name='Task-1765' coro=<SQLiteWorkerTests.test_durable_batches_and_failed_callback_rollback() running at C:\Users\User\Desktop\Telegram bots\TAutoPbot\tests\test_sqlite_worker.py:103> wait_for=<_GatheringFuture pending cb=[Task.task_wakeup()] created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\tasks.py:767> cb=[_run_until_complete_cb() at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\base_events.py:181] created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\runners.py:101> took 0.156 seconds
+..2026-10-12 23:37:30,850 | WARNING | asyncio | Executing <Task pending name='Task-1979' coro=<SQLiteWorkerTests.test_mixed_coordinated_writers_preserve_all_commits() running at C:\Users\User\Desktop\Telegram bots\TAutoPbot\tests\test_sqlite_worker.py:64> wait_for=<_GatheringFuture pending cb=[Task.task_wakeup()] created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\tasks.py:767> cb=[_run_until_complete_cb() at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\base_events.py:181] created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\runners.py:101> took 0.159 seconds
+......2026-10-12 23:37:31,718 | WARNING | asyncio | Executing <Task pending name='Task-2212' coro=<LogoDeliveryTests.test_real_photo_overlay_and_video_processing_rejected() running at C:\Users\User\Desktop\Telegram bots\TAutoPbot\tests\test_template_logos.py:502> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\futures.py:384, Task.task_wakeup()] created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\base_events.py:181] created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\runners.py:101> took 0.118 seconds
+2026-10-12 23:37:31,781 | INFO | asyncio | execute program 'C:\\Users\\User\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-9.0.1-full_build\\bin\\ffmpeg.EXE': <_WindowsSubprocessTransport pid=14096 running stderr=<_ProactorReadPipeTransport fd=976 read=<_OverlappedFuture pending cb=[_ProactorReadPipeTransport._loop_reading()] created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\windows_events.py:507>>>
+2026-10-12 23:37:31,824 | INFO | asyncio | <_WindowsSubprocessTransport pid=14096 running stderr=<_ProactorReadPipeTransport closed>> exited with return code 0
+2026-10-12 23:37:31,929 | INFO | asyncio | execute program 'C:\\Users\\User\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-9.0.1-full_build\\bin\\ffmpeg.EXE': <_WindowsSubprocessTransport pid=10300 running stderr=<_ProactorReadPipeTransport fd=912 read=<_OverlappedFuture pending cb=[_ProactorReadPipeTransport._loop_reading()] created at C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\asyncio\windows_events.py:507>>>
+2026-10-12 23:37:31,974 | INFO | asyncio | <_WindowsSubprocessTransport pid=10300 running stderr=<_ProactorReadPipeTransport closed>> exited with return code 0
+........................
+----------------------------------------------------------------------
+Ran 306 tests in 43.414s
+
+OK
